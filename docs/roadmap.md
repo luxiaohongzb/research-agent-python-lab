@@ -18,13 +18,15 @@
 
 额外交付：阶段级确定性 fallback、中文 bigram 检索、域外问题拒答门禁、Mypy strict CI。
 
-## 下一步：Iteration 3 全文和混合检索
+## 已完成：Iteration 3 全文和混合检索
 
 - GROBID sidecar：TEI 转结构化 Passage
 - PostgreSQL、pgvector HNSW 和全文索引
 - BM25、embedding、metadata、citation graph 四路召回与 RRF
 - Cross-encoder rerank 和来源多样性约束
 - Semantic Scholar 引用图与相似论文
+
+额外交付：PDF 上传 API、解析与内容版本留痕、内存降级索引、真实 pgvector 容器集成测试、可选 cross-encoder 依赖隔离。当前 Semantic Scholar 实现覆盖搜索、引用和参考文献邻域；官方 recommendation endpoint 可在相关性评测集准备完成后接入。
 
 ## Iteration 4：自适应多 Agent
 

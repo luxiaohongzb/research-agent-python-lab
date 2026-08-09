@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0">
+  <teiHeader>
+    <fileDesc>
+      <titleStmt>
+        <title>Evidence-Grounded Scientific Agents</title>
+      </titleStmt>
+      <publicationStmt><date when="2026-04-12"/></publicationStmt>
+      <sourceDesc>
+        <biblStruct>
+          <analytic>
+            <author><persName><forename>Ada</forename><surname>Lin</surname></persName></author>
+          </analytic>
+          <idno type="DOI">10.1234/agent.2026.1</idno>
+        </biblStruct>
+      </sourceDesc>
+    </fileDesc>
+    <profileDesc>
+      <abstract><p>We study auditable scientific research agents.</p></abstract>
+    </profileDesc>
+  </teiHeader>
+  <text>
+    <body>
+      <div>
+        <head>Methods</head>
+        <p coords="2,10.0,20.0,300.0,40.0">Claim verification checks every generated statement against an exact source passage.</p>
+        <div>
+          <head>Retrieval</head>
+          <p coords="3,10.0,30.0,300.0,50.0">Reciprocal rank fusion combines lexical and vector rankings without calibrating raw scores.</p>
+        </div>
+      </div>
+      <figure type="table" coords="4,10.0,40.0,300.0,80.0">
+        <head>Quality results</head><table><row><cell>citation precision 0.96</cell></row></table>
+      </figure>
+    </body>
+    <back>
+      <div><listBibl>
+        <biblStruct xml:id="b0">
+          <analytic><title>Reliable Retrieval Evaluation</title></analytic>
+          <idno type="DOI">10.9999/retrieval.1</idno>
+        </biblStruct>
+      </listBibl></div>
+    </back>
+  </text>
+</TEI>

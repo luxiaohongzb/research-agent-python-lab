@@ -4,4 +4,34 @@ services:
     ports:
       - "8000:8000"
     environment:
-      RESEARCH_AGENT_PROVIDER_MODE: offline
+      RESEARCH_AGENT_PROVIDER_MODE: ${RESEARCH_AGENT_PROVIDER_MODE:-offline}
+      RESEARCH_AGENT_INDEX_MODE: postgres
+      RESEARCH_AGENT_DATABASE_URL: postgresql://research:research@postgres:5432/research_agent
+      RESEARCH_AGENT_GROBID_URL: http://grobid:8070
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: pgvector/pgvector:0.8.5-pg17
+    environment:
+      POSTGRES_DB: research_agent
+      POSTGRES_USER: research
+      POSTGRES_PASSWORD: research
+    ports:
+      - "5432:5432"
+    volumes:
+      - research_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U research -d research_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  grobid:
+    image: grobid/grobid:0.9.0-crf
+    ports:
+      - "8070:8070"
+
+volumes:
+  research_pgdata:

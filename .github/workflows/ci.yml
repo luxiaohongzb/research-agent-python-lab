@@ -18,9 +18,37 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev,openai]"
+      - run: python -m pip install -e ".[dev,openai,postgres]"
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy src
       - run: pytest
       - run: python -m research_agent.eval_cli datasets/golden.jsonl --min-pass-rate 1.0 --summary-only
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.5-pg17
+        env:
+          POSTGRES_DB: research_agent
+          POSTGRES_USER: research
+          POSTGRES_PASSWORD: research
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U research -d research_agent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      POSTGRES_TEST_DSN: postgresql://research:research@127.0.0.1:5432/research_agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev,postgres]"
+      - run: pytest tests/test_postgres_index.py

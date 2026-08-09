@@ -14,6 +14,7 @@ from research_agent.domain import (
     EvidenceCard,
     ModelInvocation,
     Paper,
+    ParsedDocument,
     Passage,
     ResearchBudget,
     ResearchPlan,
@@ -34,6 +35,13 @@ from research_agent.providers import (
     deduplicate_papers,
 )
 from research_agent.reasoner import DeterministicReasoner, ResearchReasoner
+from research_agent.retrieval import (
+    DiversityReranker,
+    HashEmbeddingModel,
+    InMemoryHybridIndex,
+    ResearchRetriever,
+    SentenceTransformerReranker,
+)
 
 
 class ResearchState(TypedDict, total=False):
@@ -44,6 +52,7 @@ class ResearchState(TypedDict, total=False):
     budget: dict[str, Any]
     pending_tasks: list[dict[str, Any]]
     raw_papers: list[dict[str, Any]]
+    raw_passages: list[dict[str, Any]]
     papers: list[dict[str, Any]]
     passages: list[dict[str, Any]]
     evidence: list[dict[str, Any]]
@@ -61,10 +70,15 @@ class ResearchWorkflow:
     def __init__(
         self,
         *,
-        provider: CompositePaperProvider,
+        provider: CompositePaperProvider | None = None,
+        retriever: ResearchRetriever | None = None,
         reasoner: ResearchReasoner | None = None,
     ) -> None:
-        self._provider = provider
+        if retriever is None:
+            if provider is None:
+                raise ValueError("provider or retriever is required")
+            retriever = ResearchRetriever(metadata=provider)
+        self._retriever = retriever
         self._reasoner = reasoner or DeterministicReasoner()
         self._checkpointer = InMemorySaver()
         self.graph = self._build_graph()
@@ -76,7 +90,7 @@ class ResearchWorkflow:
             max_queries=max_queries,
             max_papers=request.max_papers,
             max_iterations=request.max_iterations,
-            max_tool_calls=max_queries * self._provider.provider_count,
+            max_tool_calls=max_queries * self._retriever.lane_count,
         )
         initial: ResearchState = {
             "run_id": current_run_id,
@@ -85,6 +99,7 @@ class ResearchWorkflow:
             "budget": budget.model_dump(mode="json"),
             "pending_tasks": [],
             "raw_papers": [],
+            "raw_passages": [],
             "papers": [],
             "passages": [],
             "evidence": [],
@@ -104,6 +119,9 @@ class ResearchWorkflow:
             },
         )
         return _to_result(final)
+
+    async def ingest(self, document: ParsedDocument) -> None:
+        await self._retriever.upsert(document)
 
     def _build_graph(self) -> Any:
         builder = StateGraph(ResearchState)
@@ -150,7 +168,7 @@ class ResearchWorkflow:
         tasks = [SearchTask.model_validate(item) for item in state.get("pending_tasks", [])]
         tool_capacity = (
             budget.max_tool_calls - budget.used_tool_calls
-        ) // self._provider.provider_count
+        ) // self._retriever.lane_count
         capacity = min(budget.remaining_queries, tool_capacity)
         selected = tasks[:capacity]
         if not selected:
@@ -160,27 +178,31 @@ class ResearchWorkflow:
                 "trace": _trace(state, "search", "Skipped search because the budget is exhausted."),
             }
         batches = await asyncio.gather(
-            *(self._provider.search(task, budget.max_papers) for task in selected)
+            *(self._retriever.search(task, budget.max_papers) for task in selected)
         )
         papers = [Paper.model_validate(item) for item in state.get("papers", [])]
+        passages = [Passage.model_validate(item) for item in state.get("raw_passages", [])]
         errors: list[str] = []
         for batch in batches:
             papers.extend(batch.papers)
+            passages.extend(batch.passages)
             errors.extend(batch.errors)
         consumed = budget.consume(
             queries=len(selected),
-            tool_calls=len(selected) * self._provider.provider_count,
+            tool_calls=len(selected) * self._retriever.lane_count,
         )
         warnings = [*state.get("warnings", []), *errors]
         return {
             "budget": consumed.model_dump(mode="json"),
             "raw_papers": [paper.model_dump(mode="json") for paper in papers],
+            "raw_passages": [passage.model_dump(mode="json") for passage in passages],
             "warnings": warnings,
             "trace": _trace(
                 state,
                 "search",
-                f"Executed {len(selected)} queries and collected {len(papers)} candidates.",
-                {"provider_errors": errors},
+                f"Executed {len(selected)} queries and collected {len(papers)} papers "
+                f"and {len(passages)} passages.",
+                {"retrieval_errors": errors, "retrieval_lanes": self._retriever.lane_count},
             ),
         }
 
@@ -188,24 +210,46 @@ class ResearchWorkflow:
         budget = ResearchBudget.model_validate(state["budget"])
         papers = [Paper.model_validate(item) for item in state.get("raw_papers", [])]
         unique = deduplicate_papers(papers)[: budget.max_papers]
+        paper_ids = {paper.paper_id for paper in unique}
+        selected_passages: dict[str, Passage] = {}
+        for item in state.get("raw_passages", []):
+            passage = Passage.model_validate(item)
+            if passage.paper_id in paper_ids:
+                key = passage.content_hash or passage.passage_id
+                selected_passages.setdefault(key, passage)
         return {
             "papers": [paper.model_dump(mode="json") for paper in unique],
-            "trace": _trace(state, "normalize", f"Retained {len(unique)} unique papers."),
+            "raw_passages": [
+                passage.model_dump(mode="json") for passage in selected_passages.values()
+            ],
+            "trace": _trace(
+                state,
+                "normalize",
+                f"Retained {len(unique)} unique papers and "
+                f"{len(selected_passages)} full-text passages.",
+            ),
         }
 
     async def _extract_evidence(self, state: ResearchState) -> dict[str, Any]:
         question = ResearchRequest.model_validate(state["request"]).question
         papers = tuple(Paper.model_validate(item) for item in state.get("papers", []))
-        passages = tuple(
+        paper_by_id = {paper.paper_id: paper for paper in papers}
+        retrieved = tuple(
+            Passage.model_validate(item)
+            for item in state.get("raw_passages", [])
+            if item.get("paper_id") in paper_by_id
+        )
+        full_text_paper_ids = {passage.paper_id for passage in retrieved}
+        abstract_fallback = tuple(
             Passage(
                 paper_id=paper.paper_id,
                 text=paper.abstract,
                 end_char=len(paper.abstract),
             )
             for paper in papers
-            if paper.abstract.strip()
+            if paper.abstract.strip() and paper.paper_id not in full_text_paper_ids
         )
-        paper_by_id = {paper.paper_id: paper for paper in papers}
+        passages = (*retrieved, *abstract_fallback)
         reasoned_cards = await asyncio.gather(
             *(
                 self._reasoner.extract_evidence(question, paper_by_id[passage.paper_id], passage)
@@ -323,6 +367,7 @@ class ResearchWorkflow:
 def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow:
     current = settings or get_settings()
     providers: list[Any] = [OfflinePaperProvider()]
+    citation_graph: Any = None
     if current.provider_mode == "hybrid":
         client = httpx.AsyncClient(
             timeout=httpx.Timeout(current.request_timeout_seconds),
@@ -335,6 +380,26 @@ def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow
                 CrossrefPaperProvider(client=client, email=current.openalex_email),
             )
         )
+        if current.semantic_scholar_enabled:
+            from research_agent.semantic_scholar import SemanticScholarProvider
+
+            citation_graph = SemanticScholarProvider(
+                client=client,
+                api_key=current.semantic_scholar_api_key,
+            )
+            providers.append(citation_graph)
+    embedding_model = HashEmbeddingModel()
+    if current.index_mode == "postgres":
+        from research_agent.postgres_index import PostgresHybridIndex
+
+        index: Any = PostgresHybridIndex(current.database_url, embedding_model)
+    else:
+        index = InMemoryHybridIndex(embedding_model)
+    reranker: Any
+    if current.reranker_mode == "cross_encoder":
+        reranker = SentenceTransformerReranker(current.cross_encoder_model)
+    else:
+        reranker = DiversityReranker()
     reasoner: ResearchReasoner = DeterministicReasoner()
     if current.reasoner_mode == "openai":
         try:
@@ -365,7 +430,12 @@ def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow
             )
         )
     return ResearchWorkflow(
-        provider=CompositePaperProvider(tuple(providers)),
+        retriever=ResearchRetriever(
+            metadata=CompositePaperProvider(tuple(providers)),
+            index=index,
+            citation_graph=citation_graph,
+            reranker=reranker,
+        ),
         reasoner=reasoner,
     )
 

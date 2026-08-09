@@ -121,6 +121,9 @@ class Passage(FrozenModel):
     page: int | None = None
     start_char: int = Field(default=0, ge=0)
     end_char: int = Field(ge=0)
+    coordinates: tuple[str, ...] = ()
+    parser_version: str | None = None
+    content_hash: str | None = None
 
     @model_validator(mode="after")
     def validate_offsets(self) -> Passage:
@@ -138,6 +141,45 @@ class EvidenceCard(FrozenModel):
     limitations: tuple[str, ...] = ()
     source_quality: str = "MEDIUM"
     confidence: float = Field(ge=0, le=1)
+
+
+class CitationRelation(StrEnum):
+    REFERENCES = "REFERENCES"
+    CITED_BY = "CITED_BY"
+    RECOMMENDED = "RECOMMENDED"
+
+
+class CitationEdge(FrozenModel):
+    source_paper_id: str
+    target_paper_id: str
+    relation: CitationRelation
+    source: str
+
+
+class ParsedDocument(FrozenModel):
+    paper: Paper
+    passages: tuple[Passage, ...]
+    citation_edges: tuple[CitationEdge, ...] = ()
+    document_hash: str
+    parser: str
+    parser_version: str
+
+
+class RetrievalLane(StrEnum):
+    KEYWORD = "KEYWORD"
+    VECTOR = "VECTOR"
+    METADATA = "METADATA"
+    CITATION_GRAPH = "CITATION_GRAPH"
+    RERANK = "RERANK"
+
+
+class RetrievalHit(FrozenModel):
+    paper: Paper
+    passage: Passage
+    lane_ranks: dict[RetrievalLane, int]
+    lane_scores: dict[RetrievalLane, float]
+    fused_score: float = Field(ge=0)
+    final_rank: int = Field(ge=1)
 
 
 class AtomicClaim(FrozenModel):

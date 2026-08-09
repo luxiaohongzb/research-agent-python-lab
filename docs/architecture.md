@@ -7,10 +7,14 @@
 ```mermaid
 flowchart TD
     A[ResearchRequest] --> B[Planner]
-    B --> C[Parallel Provider Search]
-    C --> D[DOI and Title Dedup]
-    D --> E[Passage and EvidenceCard]
-    E --> F{Coverage Judge}
+    B --> C[Metadata and Citation Search]
+    B --> D[Keyword and Vector Search]
+    C --> E[RRF and Diversity Rerank]
+    D --> E
+    E --> N[DOI and Title Dedup]
+    N --> O[Full-text Passage or Abstract Fallback]
+    O --> P[EvidenceCard]
+    P --> F{Coverage Judge}
     F -->|gap and budget remains| G[Refine Query]
     G --> C
     F -->|enough or budget exhausted| H[Report Synthesis]
@@ -25,6 +29,10 @@ flowchart TD
 
 - `domain.py`：稳定的科研数据契约，不依赖框架。
 - `providers.py`：外部学术检索端口和适配器，失败隔离、DOI/标题归并。
+- `ingestion.py`：GROBID multipart 客户端和 TEI → Passage/引用边转换。
+- `retrieval.py`：关键词、向量、元数据、引用图召回契约，RRF 与 reranker。
+- `postgres_index.py`：PostgreSQL `tsvector`、pgvector HNSW 和持久化引用边。
+- `semantic_scholar.py`：Semantic Scholar 搜索与一跳引用邻域。
 - `reasoner.py`：规划、证据抽取、综合和验证端口。默认确定性实现保证离线复现。
 - `llm_reasoner.py`：原生 JSON Schema 输出、语义后校验、调用指标和阶段级 fallback。
 - `prompts.py`：四个职责隔离且有版本号的系统提示词。
@@ -63,6 +71,14 @@ flowchart TD
 - 论文全文和解析文件进入对象存储；
 - Passage、EvidenceCard 和 Claim 进入 Artifact Store；
 - graph state 只保存 ID 和短摘要，避免上下文膨胀。
+
+### 为什么使用 RRF
+
+BM25/`ts_rank_cd`、余弦相似度、元数据相关性和引用图信号的数值范围不同，直接加权会把校准问题隐藏在常数中。当前实现先在各 lane 内排序，再以 `1 / (k + rank)` 融合；cross-encoder 只对候选集重排，不承担全库召回。每个 `RetrievalHit` 保留 lane rank、lane score、融合分数和最终名次，便于离线评测与线上解释。
+
+### 全文退化策略
+
+PDF 上传依次经过文件头/体积校验、GROBID 全文接口、TEI 解析和索引写入。研究查询优先使用命中的全文 Passage；没有全文命中时才从摘要生成 Passage。因此 GROBID 或数据库不可用不会破坏默认离线演示，但生产部署应为 GROBID 503 增加队列、熔断和异步重试。
 
 ### 安全边界
 

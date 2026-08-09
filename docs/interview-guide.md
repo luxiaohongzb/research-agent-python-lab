@@ -13,6 +13,8 @@
 5. 评测分层：分别测引用精度、覆盖率、支持率和预算利用率。
 6. 结构化输出不是终点：Provider 保证 JSON schema，Java/Python 领域规则继续校验引用白名单、置信度和来源绑定。
 7. 可观测 fallback：单阶段模型失败不会丢掉整个 run，失败次数、错误类型、token、延迟和 prompt 版本会保留。
+8. 混合检索不直接相加原始分数：四路召回先各自排序，再用 RRF 融合，候选集最后做 cross-encoder/来源多样性重排。
+9. 全文引用不是字符串拼接：GROBID TEI 被解析为带章节、页码、坐标、版本和哈希的 Passage，证据可回到 PDF 位置。
 
 ## 常见追问
 
@@ -30,4 +32,4 @@ JSON Schema 只能保证字段和类型正确，不能保证 evidence ID 真正�
 
 ### 如何进入生产？
 
-将内存 checkpoint 换 PostgreSQL，全文解析交给 GROBID，检索升级为 BM25 + pgvector + citation graph + reranker，并加入幂等、限流、熔断、OpenTelemetry 和人工审批。
+全文解析和 BM25 + pgvector + citation graph + reranker 已形成基础链路。下一步将内存 checkpoint 换成 PostgreSQL，加入领域 embedding 评测、幂等、限流、熔断、OpenTelemetry 和人工审批。

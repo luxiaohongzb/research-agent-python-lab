@@ -18,7 +18,11 @@ Synthesize → Atomic Claims → Verify → Quality Gate
 - `ResearchBudget`：限制查询数、论文数、迭代数和工具调用
 - `Paper → Passage → EvidenceCard → AtomicClaim → VerificationResult` 可追溯链路
 - `SUPPORTED / PARTIAL / CONFLICT / UNSUPPORTED` Claim-level 核验
-- 离线可复现语料，以及可选 OpenAlex、Crossref 实时检索
+- 离线可复现语料，以及可选 OpenAlex、Crossref、Semantic Scholar 实时检索
+- GROBID PDF → TEI → 章节、页码、坐标可追溯的结构化 Passage
+- 内存混合索引，以及 PostgreSQL `tsvector` + pgvector HNSW 持久化索引
+- 关键词、向量、元数据、引用图多路召回，使用 RRF 融合不可比的原始分数
+- 默认来源多样性 rerank，以及可选 cross-encoder rerank
 - OpenAI 原生 JSON Schema 结构化 Planner、Extractor、Synthesizer、Verifier
 - 每阶段 schema/语义校验、有限重试、确定性 fallback 与失败调用留痕
 - 模型、prompt 版本、延迟、token 和可配置费用估算
@@ -33,6 +37,7 @@ Synthesize → Atomic Claims → Verify → Quality Gate
 - Pydantic 2
 - FastAPI
 - HTTPX
+- PostgreSQL 17、pgvector 0.8、GROBID 0.9
 - Pytest、Ruff、Mypy
 
 ## 快速开始
@@ -78,6 +83,43 @@ RESEARCH_AGENT_OPENALEX_EMAIL=you@example.com
 
 `hybrid` 会并行查询离线语料、OpenAlex 和 Crossref。单个远端源失败不会让整个研究任务失败，错误会进入 Trace。
 
+启用 Semantic Scholar 元数据和引用邻域：
+
+```bash
+RESEARCH_AGENT_SEMANTIC_SCHOLAR_ENABLED=true
+RESEARCH_AGENT_SEMANTIC_SCHOLAR_API_KEY=...  # 可选，但正式使用建议配置
+```
+
+## 全文与混合检索
+
+一条命令启动 API、PostgreSQL/pgvector 和 GROBID：
+
+```bash
+docker compose up --build
+```
+
+也可以只启动 PostgreSQL，在宿主机运行 API：
+
+```bash
+docker compose up -d postgres
+python -m pip install -e ".[dev,postgres]"
+RESEARCH_AGENT_INDEX_MODE=postgres uvicorn research_agent.api:app --reload
+```
+
+上传 PDF 后，GROBID 返回的 TEI 会被转换为带章节、页码、PDF 坐标、解析器版本和内容哈希的 Passage，并写入当前索引：
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/corpus/documents \
+  -F "file=@paper.pdf;type=application/pdf"
+```
+
+默认 `memory` 索引使用确定性的本地 hash embedding，适合测试和演示；`postgres` 模式验证生产形态的数据链。正式语义质量需要替换科学领域 embedding，并通过迁移同步修改 `vector(256)` 维度。可选 cross-encoder：
+
+```bash
+python -m pip install -e ".[ml]"
+RESEARCH_AGENT_RERANKER_MODE=cross_encoder
+```
+
 ## 结构化 LLM 模式
 
 离线模式始终是默认值。启用 OpenAI 结构化输出：
@@ -109,13 +151,17 @@ src/research_agent/
 ├── eval_cli.py            Golden dataset 质量门禁
 ├── evaluation.py          分层评测指标
 ├── llm_reasoner.py         结构化 LLM 与阶段级 fallback
+├── ingestion.py            GROBID 客户端与 TEI 结构化解析
+├── postgres_index.py       tsvector、pgvector HNSW 与 RRF
 ├── prompts.py              版本化、安全边界明确的 prompts
 ├── providers.py           Offline/OpenAlex/Crossref adapters
+├── retrieval.py           混合召回、RRF 与 reranker
 ├── reasoner.py            可替换推理策略
+├── semantic_scholar.py     元数据与引用邻域 adapter
 └── workflow.py            LangGraph 状态图和质量门禁
 ```
 
-详细设计见 [架构说明](docs/architecture.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
+详细设计见 [架构说明](docs/architecture.md)，混合检索实践见 [全文检索指南](docs/hybrid-retrieval.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
 
 ## 设计原则
 
@@ -127,4 +173,4 @@ src/research_agent/
 
 ## 当前边界
 
-这是 MVP-2：全文 PDF 解析、pgvector、引用图、多 Worker fan-out、持久化 checkpoint 和人工审批 UI 位于后续路线。离线语料与 golden cases 用于验证架构和回归，不代表真实科学结论。
+这是 Iteration 3：全文 PDF 解析、pgvector 和引用图检索已形成可运行基础链路。当前 hash embedding 与词法 reranker 是确定性工程基线，不代表 SOTA 语义效果；多 Worker fan-out、持久化 checkpoint、模型化科学 embedding、权限控制和人工审批 UI 位于后续路线。离线语料与 golden cases 用于验证架构和回归，不代表真实科学结论。

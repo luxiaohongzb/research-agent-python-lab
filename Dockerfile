@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN python -m pip install --upgrade pip && python -m pip install .
+RUN python -m pip install --upgrade pip && python -m pip install ".[postgres]"
 
 EXPOSE 8000
 CMD ["uvicorn", "research_agent.api:app", "--host", "0.0.0.0", "--port", "8000"]
