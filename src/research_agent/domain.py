@@ -18,6 +18,7 @@ class RunStatus(StrEnum):
     COMPLETED = "COMPLETED"
     NEEDS_REVIEW = "NEEDS_REVIEW"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class Complexity(StrEnum):
@@ -250,6 +251,12 @@ class WorkerStatus(StrEnum):
     TIMED_OUT = "TIMED_OUT"
 
 
+class ReviewDecision(StrEnum):
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+    REQUEST_CHANGES = "REQUEST_CHANGES"
+
+
 class ResearchWorkerResult(FrozenModel):
     worker_id: str
     task_id: str
@@ -266,6 +273,32 @@ class ResearchWorkerAssignment(FrozenModel):
     task: SearchTask
     max_papers: int = Field(ge=1)
     timeout_seconds: float = Field(gt=0)
+
+
+class HumanReviewRequest(FrozenModel):
+    reviewer: str = Field(min_length=1, max_length=200)
+    decision: ReviewDecision
+    comment: str = Field(default="", max_length=4_000)
+    claim_id: str | None = None
+    evidence_id: str | None = None
+
+
+class HumanReview(FrozenModel):
+    review_id: str = Field(default_factory=lambda: f"review-{uuid4().hex[:12]}")
+    reviewer: str
+    decision: ReviewDecision
+    comment: str = ""
+    claim_id: str | None = None
+    evidence_id: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class RunEvent(FrozenModel):
+    sequence: int = Field(ge=1)
+    run_id: str
+    event: str
+    details: dict[str, Any] = Field(default_factory=dict)
+    occurred_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class AtomicClaim(FrozenModel):
@@ -340,7 +373,9 @@ class RunSnapshot(FrozenModel):
     run_id: str
     status: RunStatus
     request: ResearchRequest
+    idempotency_key: str | None = None
     result: ResearchResult | None = None
+    reviews: tuple[HumanReview, ...] = ()
     error: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

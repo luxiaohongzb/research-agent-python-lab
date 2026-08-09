@@ -47,6 +47,10 @@ flowchart TD
 - `application.py`：同步/异步用例和运行状态。
 - `api.py`：HTTP 边界，不承载业务规则。
 - `artifacts.py`：并行 Worker 的 run-scoped 大对象交接，图状态只保存引用。
+- `run_store.py`：运行快照持久化和数据库级幂等约束。
+- `events.py`：SSE 事件的有界回放与实时 fan-out。
+- `observability.py`：Prometheus 运行指标、质量摘要和可选 OTLP trace。
+- `citations.py`：从规范化 Paper 生成 BibTeX 和 CSL JSON。
 - `evaluation.py`：独立于运行链路的质量指标。
 
 ## 关键决策
@@ -73,12 +77,28 @@ flowchart TD
 
 ### 状态与 Artifact
 
-当前 MVP 将序列化后的领域对象放入 LangGraph state，使用 `InMemorySaver` checkpoint。生产演进时：
+默认开发模式将序列化后的领域对象放入 LangGraph state，并使用 `InMemorySaver`。
+设置 `CHECKPOINT_MODE=postgres` 后，工作流切换到官方 `AsyncPostgresSaver`，由
+LangGraph 管理 checkpoint 表；`RUN_STORE_MODE=postgres` 则把任务状态、结果、审阅和
+幂等键保存为应用自己的 JSONB 快照。两者职责不同：checkpoint 用于恢复图执行，run
+store 用于稳定的 HTTP 查询契约。
 
-- checkpoint 迁移到 PostgreSQL；
+下一步生产演进：
+
 - 论文全文和解析文件进入对象存储；
 - Passage、EvidenceCard 和 Claim 进入 Artifact Store；
 - graph state 只保存 ID 和短摘要，避免上下文膨胀。
+
+### 运行控制与事件
+
+`Idempotency-Key` 在 PostgreSQL 中有唯一约束，重复提交返回原 run；取消会停止当前实例
+持有的 asyncio task，并保留最近 checkpoint；恢复用相同 `thread_id/run_id` 从 checkpoint
+继续。工作流的节点更新被转换为带单调 sequence 的 SSE 事件，客户端可通过
+`after_sequence` 重放断线期间的有界历史。
+
+当前事件 broker、task 注册表和 Artifact Store 都是进程内实现。这意味着单实例和进程
+重启恢复已经可演示，但跨副本取消和事件订阅尚不成立；多副本版本需要共享事件总线、
+持久化 Artifact、Worker 租约及协作式取消标记。
 
 ### 为什么使用 RRF
 

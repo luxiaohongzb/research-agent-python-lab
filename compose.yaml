@@ -6,8 +6,11 @@ services:
     environment:
       RESEARCH_AGENT_PROVIDER_MODE: ${RESEARCH_AGENT_PROVIDER_MODE:-offline}
       RESEARCH_AGENT_INDEX_MODE: postgres
+      RESEARCH_AGENT_CHECKPOINT_MODE: postgres
+      RESEARCH_AGENT_RUN_STORE_MODE: postgres
       RESEARCH_AGENT_DATABASE_URL: postgresql://research:research@postgres:5432/research_agent
       RESEARCH_AGENT_GROBID_URL: http://grobid:8070
+      RESEARCH_AGENT_OTEL_ENABLED: ${RESEARCH_AGENT_OTEL_ENABLED:-false}
     depends_on:
       postgres:
         condition: service_healthy

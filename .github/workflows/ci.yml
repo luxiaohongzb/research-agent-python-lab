@@ -51,4 +51,4 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev,postgres]"
-      - run: pytest tests/test_postgres_index.py
+      - run: pytest tests/test_postgres_index.py tests/test_postgres_runtime.py

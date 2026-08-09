@@ -32,6 +32,9 @@ Synthesize → Atomic Claims → Verify → Quality Gate
 - 模型、prompt 版本、延迟、token 和可配置费用估算
 - 确定性 reasoner，未配置模型也可以运行全部流程和测试
 - FastAPI 同步接口、异步任务接口和运行 Trace
+- PostgreSQL 运行快照与 LangGraph checkpoint，支持幂等提交、取消和断点恢复
+- 原生 SSE 进度流、Claim/Evidence 人工审阅记录、BibTeX/CSL JSON 导出
+- Prometheus 指标、运行质量摘要，以及可选 OpenTelemetry OTLP trace
 - 24 条中英双语 golden cases，以及引用精度、覆盖率、支持率 CI 门禁
 
 ## 技术栈
@@ -54,7 +57,7 @@ python -m pip install -e ".[dev]"
 pytest
 research-agent-eval datasets/golden.jsonl --min-pass-rate 1.0
 research-agent "agentic RAG 如何提高科研综述的可信度"
-uvicorn research_agent.api:app --reload
+research-agent-server --reload
 ```
 
 打开 `http://127.0.0.1:8000/docs` 查看接口文档。
@@ -71,10 +74,16 @@ curl -X POST http://127.0.0.1:8000/v1/research/run \
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/research/runs \
+  -H "Idempotency-Key: interview-demo-001" \
   -H "Content-Type: application/json" \
   -d '{"question":"Compare agentic RAG and one-shot RAG"}'
 curl http://127.0.0.1:8000/v1/research/runs/{run_id}
 ```
+
+异步接口还提供 `DELETE /runs/{run_id}` 取消、`POST /runs/{run_id}/resume`
+恢复、`GET /runs/{run_id}/events` SSE 进度、`POST /runs/{run_id}/reviews`
+人工审阅，以及 BibTeX/CSL JSON 导出。完整契约和调用示例见
+[生产工作台指南](docs/production-workbench.md)。
 
 ## 数据源模式
 
@@ -107,8 +116,15 @@ docker compose up --build
 ```bash
 docker compose up -d postgres
 python -m pip install -e ".[dev,postgres]"
-RESEARCH_AGENT_INDEX_MODE=postgres uvicorn research_agent.api:app --reload
+$env:RESEARCH_AGENT_INDEX_MODE="postgres"          # PowerShell
+$env:RESEARCH_AGENT_CHECKPOINT_MODE="postgres"
+$env:RESEARCH_AGENT_RUN_STORE_MODE="postgres"
+research-agent-server
 ```
+
+macOS/Linux 请用 `export` 设置同名变量。Windows 上异步 psycopg 需要 Selector
+事件循环，因此 PostgreSQL checkpoint 模式应通过 `research-agent-server` 启动；
+Docker/Linux 仍可直接使用 `uvicorn`。
 
 上传 PDF 后，GROBID 返回的 TEI 会被转换为带章节、页码、PDF 坐标、解析器版本和内容哈希的 Passage，并写入当前索引：
 
@@ -151,22 +167,27 @@ src/research_agent/
 ├── api.py                 FastAPI 与异步任务接口
 ├── artifacts.py           Worker 间的大对象引用存储
 ├── application.py         用例编排与运行存储
+├── citations.py           BibTeX 与 CSL JSON 导出
 ├── config.py              环境配置
 ├── domain.py              科研领域契约
+├── events.py              有界回放和实时 SSE 事件 broker
 ├── eval_cli.py            Golden dataset 质量门禁
 ├── evaluation.py          分层评测指标
 ├── llm_reasoner.py         结构化 LLM 与阶段级 fallback
 ├── ingestion.py            GROBID 客户端与 TEI 结构化解析
+├── observability.py       Prometheus、质量摘要与 OTLP trace
 ├── postgres_index.py       tsvector、pgvector HNSW 与 RRF
 ├── prompts.py              版本化、安全边界明确的 prompts
 ├── providers.py           Offline/OpenAlex/Crossref adapters
 ├── retrieval.py           混合召回、RRF 与 reranker
 ├── reasoner.py            可替换推理策略
+├── run_store.py           内存/PostgreSQL 运行快照
 ├── semantic_scholar.py     元数据与引用邻域 adapter
+├── server.py              跨平台 API 启动入口
 └── workflow.py            LangGraph 状态图和质量门禁
 ```
 
-详细设计见 [架构说明](docs/architecture.md)，多 Agent 实践见 [Supervisor 指南](docs/multi-agent.md)，混合检索实践见 [全文检索指南](docs/hybrid-retrieval.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
+详细设计见 [架构说明](docs/architecture.md)，运行与恢复见 [生产工作台指南](docs/production-workbench.md)，多 Agent 实践见 [Supervisor 指南](docs/multi-agent.md)，混合检索实践见 [全文检索指南](docs/hybrid-retrieval.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
 
 ## 设计原则
 
@@ -178,4 +199,4 @@ src/research_agent/
 
 ## 当前边界
 
-这是 Iteration 4：全文混合检索和自适应多 Agent 已形成可运行基础链路。当前 Artifact Store 与 checkpoint 都是进程内实现，hash embedding 与词法 reranker 是确定性工程基线，不代表 SOTA 语义效果；持久化 checkpoint/Artifact Store、领域 embedding、权限控制和人工审批 UI 位于后续路线。离线语料与 golden cases 用于验证架构和回归，不代表真实科学结论。
+这是 Iteration 5：全文混合检索、自适应多 Agent 和生产工作台后端已形成可运行链路。运行快照与 checkpoint 可持久化到 PostgreSQL；事件 broker 和 Artifact Store 仍是单进程有界内存实现，因此多副本部署前还需要 Redis/NATS 事件总线、持久化对象存储和分布式取消租约。hash embedding 与词法 reranker 是确定性工程基线，不代表 SOTA 语义效果；领域 embedding、鉴权/RBAC 和人工审批 UI 位于后续路线。离线语料与 golden cases 用于验证架构和回归，不代表真实科学结论。

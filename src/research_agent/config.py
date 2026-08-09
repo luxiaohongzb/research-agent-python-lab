@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     provider_mode: Literal["offline", "hybrid"] = "offline"
     reasoner_mode: Literal["deterministic", "openai"] = "deterministic"
     index_mode: Literal["memory", "postgres"] = "memory"
+    checkpoint_mode: Literal["memory", "postgres"] = "memory"
+    run_store_mode: Literal["memory", "postgres"] = "memory"
     reranker_mode: Literal["lexical", "cross_encoder"] = "lexical"
     openalex_email: str | None = None
     semantic_scholar_enabled: bool = False
@@ -26,6 +28,8 @@ class Settings(BaseSettings):
     grobid_timeout_seconds: float = Field(default=120.0, gt=0, le=300)
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     worker_timeout_seconds: float = Field(default=45.0, gt=0, le=300)
+    otel_enabled: bool = False
+    otel_service_name: str = "research-agent-python-lab"
     request_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
     default_max_papers: int = Field(default=8, ge=1, le=50)
     default_max_iterations: int = Field(default=2, ge=1, le=5)

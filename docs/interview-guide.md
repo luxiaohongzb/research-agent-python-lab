@@ -17,6 +17,9 @@
 9. 全文引用不是字符串拼接：GROBID TEI 被解析为带章节、页码、坐标、版本和哈希的 Passage，证据可回到 PDF 位置。
 10. 自适应 fan-out：只有 `DEEP` 问题才用 `Send` 并行派发 Worker，简单问题不支付协调成本。
 11. Worker 传 Artifact ID 而非全文，Supervisor 是唯一归并点；超时或失败 Worker 不影响其他分支。
+12. 运行快照和 checkpoint 分层：前者服务 HTTP 查询与幂等，后者服务 LangGraph 断点恢复。
+13. SSE 使用 sequence 支持断线重放；Prometheus 看运行趋势，Trace 看单次调用路径。
+14. 人工审阅绑定具体 Claim/Evidence ID，BibTeX/CSL 导出复用规范化文献模型。
 
 ## 常见追问
 
@@ -38,4 +41,6 @@ JSON Schema 只能保证字段和类型正确，不能保证 evidence ID 真正�
 
 ### 如何进入生产？
 
-全文检索和自适应多 Agent 已形成基础链路。下一步将内存 checkpoint/Artifact Store 换成持久化实现，加入领域 embedding 评测、幂等、取消、限流、熔断、OpenTelemetry 和人工审批。
+单实例生产工作台已经具备 PostgreSQL checkpoint/运行快照、幂等、取消恢复、SSE、
+Prometheus、OpenTelemetry 接入点和人工审阅记录。多副本部署前还需把事件、Artifact 和
+取消信号迁移到共享基础设施，并增加 OIDC/RBAC、租户隔离、限流、熔断和审批 UI。

@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import operator
 import time
-from typing import Annotated, Any, Literal, TypedDict
+from collections.abc import Awaitable, Callable
+from typing import Annotated, Any, Literal, TypedDict, cast
 from uuid import uuid4
 
 import httpx
@@ -75,7 +76,7 @@ class ResearchState(TypedDict, total=False):
     trace: list[dict[str, Any]]
     warnings: list[str]
     model_invocations: list[dict[str, Any]]
-    started_monotonic: float
+    started_epoch_seconds: float
     worker_assignments: list[dict[str, Any]]
     worker_outputs: Annotated[list[dict[str, Any]], operator.add]
     worker_results: list[dict[str, Any]]
@@ -95,6 +96,7 @@ class ResearchWorkflow:
         reasoner: ResearchReasoner | None = None,
         artifact_store: InMemoryArtifactStore | None = None,
         worker_timeout_seconds: float = 45.0,
+        checkpoint_dsn: str | None = None,
     ) -> None:
         if retriever is None:
             if provider is None:
@@ -106,9 +108,58 @@ class ResearchWorkflow:
         self._artifact_store = artifact_store or InMemoryArtifactStore()
         self._worker_timeout_seconds = worker_timeout_seconds
         self._checkpointer = InMemorySaver()
+        self._checkpoint_dsn = checkpoint_dsn
+        self._checkpoint_context: Any = None
+        self._initialization_lock = asyncio.Lock()
+        self._initialized = checkpoint_dsn is None
         self.graph = self._build_graph()
 
-    async def run(self, request: ResearchRequest, *, run_id: str | None = None) -> ResearchResult:
+    async def initialize(self) -> None:
+        if self._initialized:
+            return
+        async with self._initialization_lock:
+            if self._initialized:
+                return
+            if type(asyncio.get_running_loop()).__name__ == "ProactorEventLoop":
+                raise RuntimeError(
+                    "PostgreSQL checkpointing requires a Windows selector event loop; "
+                    "start the API with `research-agent-server`"
+                )
+            try:
+                module = __import__(
+                    "langgraph.checkpoint.postgres.aio",
+                    fromlist=["AsyncPostgresSaver"],
+                )
+            except ImportError as exc:
+                raise RuntimeError(
+                    'PostgreSQL checkpointing requires: python -m pip install -e ".[postgres]"'
+                ) from exc
+            context = module.AsyncPostgresSaver.from_conn_string(self._checkpoint_dsn)
+            saver = await context.__aenter__()
+            try:
+                await saver.setup()
+            except BaseException:
+                await context.__aexit__(*__import__("sys").exc_info())
+                raise
+            self._checkpoint_context = context
+            self._checkpointer = saver
+            self.graph = self._build_graph()
+            self._initialized = True
+
+    async def close(self) -> None:
+        if self._checkpoint_context is not None:
+            await self._checkpoint_context.__aexit__(None, None, None)
+            self._checkpoint_context = None
+            self._initialized = False
+
+    async def run(
+        self,
+        request: ResearchRequest,
+        *,
+        run_id: str | None = None,
+        progress: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> ResearchResult:
+        await self.initialize()
         current_run_id = run_id or uuid4().hex
         max_queries = max(3, request.max_iterations * 3)
         budget = ResearchBudget(
@@ -139,19 +190,57 @@ class ResearchWorkflow:
             "trace": [],
             "warnings": [],
             "model_invocations": [],
-            "started_monotonic": time.monotonic(),
+            "started_epoch_seconds": time.time(),
             "worker_assignments": [],
             "worker_outputs": [],
             "worker_results": [],
         }
-        final = await self.graph.ainvoke(
-            initial,
-            config={
-                "configurable": {"thread_id": current_run_id},
-                "recursion_limit": 40,
-            },
-        )
+        config = _graph_config(current_run_id)
+        final = await self._invoke_graph(initial, config=config, progress=progress)
         return _to_result(final)
+
+    async def resume(
+        self,
+        request: ResearchRequest,
+        *,
+        run_id: str,
+        progress: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> ResearchResult:
+        await self.initialize()
+        config = _graph_config(run_id)
+        checkpoint = await self.graph.aget_state(config)
+        if not checkpoint.values:
+            return await self.run(request, run_id=run_id, progress=progress)
+        final = await self._invoke_graph(None, config=config, progress=progress)
+        return _to_result(final)
+
+    async def _invoke_graph(
+        self,
+        graph_input: ResearchState | None,
+        *,
+        config: dict[str, Any],
+        progress: Callable[[str, dict[str, Any]], Awaitable[None]] | None,
+    ) -> ResearchState:
+        if progress is None:
+            final = await self.graph.ainvoke(graph_input, config=config)
+        else:
+            final = None
+            async for mode, payload in self.graph.astream(
+                graph_input,
+                config=config,
+                stream_mode=["updates", "values"],
+            ):
+                if mode == "values":
+                    final = payload
+                elif mode == "updates":
+                    for node, update in payload.items():
+                        details = (
+                            {"updated_fields": sorted(update)} if isinstance(update, dict) else {}
+                        )
+                        await progress(str(node), details)
+            if final is None:
+                raise RuntimeError("research graph completed without a final state")
+        return cast(ResearchState, final)
 
     async def ingest(self, document: ParsedDocument) -> None:
         await self._retriever.upsert(document)
@@ -693,7 +782,15 @@ def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow
         ),
         reasoner=reasoner,
         worker_timeout_seconds=current.worker_timeout_seconds,
+        checkpoint_dsn=(current.database_url if current.checkpoint_mode == "postgres" else None),
     )
+
+
+def _graph_config(run_id: str) -> dict[str, Any]:
+    return {
+        "configurable": {"thread_id": run_id},
+        "recursion_limit": 40,
+    }
 
 
 def _trace(
@@ -759,10 +856,10 @@ def _reasoned_updates(state: ResearchState, outputs: tuple[Any, ...] | list[Any]
 
 def _budget_with_elapsed(state: ResearchState) -> ResearchBudget:
     budget = ResearchBudget.model_validate(state["budget"])
-    started = state.get("started_monotonic")
+    started = state.get("started_epoch_seconds")
     if started is None:
         return budget
-    elapsed_ms = max(budget.elapsed_ms, int((time.monotonic() - started) * 1_000))
+    elapsed_ms = max(budget.elapsed_ms, int((time.time() - started) * 1_000))
     return budget.record_usage(elapsed_ms=elapsed_ms)
 
 
@@ -775,9 +872,9 @@ def _record_output_usage(
         (item.input_tokens or 0) + (item.output_tokens or 0) for item in output.model_invocations
     )
     cost = sum(item.estimated_cost_usd or 0 for item in output.model_invocations)
-    started = state.get("started_monotonic")
+    started = state.get("started_epoch_seconds")
     elapsed_ms = (
-        max(budget.elapsed_ms, int((time.monotonic() - started) * 1_000))
+        max(budget.elapsed_ms, int((time.time() - started) * 1_000))
         if started is not None
         else budget.elapsed_ms
     )

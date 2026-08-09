@@ -16,13 +16,24 @@ dependencies = [
   "langgraph>=1.2.10,<2",
   "pydantic>=2.13.4,<3",
   "pydantic-settings>=2.11,<3",
+  "prometheus-client>=0.26,<1",
   "python-multipart>=0.0.20,<1",
   "uvicorn[standard]>=0.35,<1",
 ]
 
 [project.optional-dependencies]
 openai = ["langchain-openai>=1.3.3,<2"]
-postgres = ["asyncpg>=0.31,<1", "pgvector>=0.5,<1"]
+postgres = [
+  "asyncpg>=0.31,<1",
+  "langgraph-checkpoint-postgres>=3.1.2,<4",
+  "pgvector>=0.5,<1",
+  "psycopg[binary,pool]>=3.3,<4",
+]
+observability = [
+  "opentelemetry-api>=1.39,<2",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.39,<2",
+  "opentelemetry-sdk>=1.39,<2",
+]
 ml = ["sentence-transformers>=5.1,<6"]
 dev = [
   "mypy>=1.17,<2",
@@ -34,6 +45,7 @@ dev = [
 [project.scripts]
 research-agent = "research_agent.cli:main"
 research-agent-eval = "research_agent.eval_cli:main"
+research-agent-server = "research_agent.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/research_agent"]
