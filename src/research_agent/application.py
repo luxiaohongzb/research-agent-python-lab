@@ -6,6 +6,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from research_agent.audit import AuditEvent, AuditStore, InMemoryAuditStore
 from research_agent.distributed import (
     CancellationRegistry,
     InMemoryCancellationRegistry,
@@ -22,6 +23,7 @@ from research_agent.domain import (
     RunStatus,
 )
 from research_agent.events import InMemoryRunEventBroker, RunEventBroker
+from research_agent.governance import QuotaPolicy
 from research_agent.observability import RuntimeObservability, RuntimeSummary
 from research_agent.run_store import (
     IdempotencyConflictError,
@@ -58,6 +60,8 @@ class ResearchApplicationService:
         queue: RunQueue | None = None,
         cancellations: CancellationRegistry | None = None,
         observability: RuntimeObservability | None = None,
+        audit: AuditStore | None = None,
+        quota: QuotaPolicy | None = None,
     ) -> None:
         self._workflow = workflow
         self._store = store or InMemoryRunStore()
@@ -65,9 +69,20 @@ class ResearchApplicationService:
         self._queue = queue
         self._cancellations = cancellations or InMemoryCancellationRegistry()
         self._observability = observability or RuntimeObservability()
+        self._audit = audit or InMemoryAuditStore()
+        self._quota = quota
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
-    async def run(self, request: ResearchRequest, *, run_id: str | None = None) -> ResearchResult:
+    async def run(
+        self,
+        request: ResearchRequest,
+        *,
+        run_id: str | None = None,
+        tenant_id: str = "default",
+        actor: str = "system",
+    ) -> ResearchResult:
+        if self._quota is not None:
+            await self._quota.enforce(tenant_id, request)
         await self._observability.started()
         try:
             with self._observability.span(
@@ -79,6 +94,15 @@ class ResearchApplicationService:
             await self._observability.failed(RunStatus.FAILED.value)
             raise
         await self._observability.finished(result)
+        await self._audit.append(
+            AuditEvent(
+                tenant_id=tenant_id,
+                actor=actor,
+                action="research.synchronous_completed",
+                run_id=result.run_id,
+                details={"status": result.status.value},
+            )
+        )
         return result
 
     async def initialize(self) -> None:
@@ -89,28 +113,43 @@ class ResearchApplicationService:
         request: ResearchRequest,
         *,
         idempotency_key: str | None = None,
+        tenant_id: str = "default",
+        actor: str = "system",
     ) -> RunSnapshot:
         run_id = uuid4().hex
         candidate = RunSnapshot(
             run_id=run_id,
+            tenant_id=tenant_id,
             status=RunStatus.PENDING,
             request=request,
             idempotency_key=idempotency_key,
         )
+        if idempotency_key:
+            existing = await self._store.find_by_idempotency(tenant_id, idempotency_key)
+            if existing is not None:
+                snapshot = await self._store.create(candidate)
+                if self._queue is not None and snapshot.status is RunStatus.PENDING:
+                    await self._queue.enqueue(snapshot.run_id)
+                return snapshot
+        if self._quota is not None:
+            await self._quota.enforce(tenant_id, request)
         snapshot = await self._store.create(candidate)
         if snapshot.run_id != run_id:
             if self._queue is not None and snapshot.status is RunStatus.PENDING:
                 await self._queue.enqueue(snapshot.run_id)
             return snapshot
         await self._events.publish(run_id, "queued", {"status": snapshot.status.value})
+        await self._record("research.submitted", snapshot, actor)
         await self._dispatch(snapshot)
         return snapshot
 
-    async def get(self, run_id: str) -> RunSnapshot:
-        return await self._store.get(run_id)
+    async def get(self, run_id: str, *, tenant_id: str | None = None) -> RunSnapshot:
+        return await self._store.get(run_id, tenant_id=tenant_id)
 
-    async def cancel(self, run_id: str) -> RunSnapshot:
-        snapshot = await self._store.get(run_id)
+    async def cancel(
+        self, run_id: str, *, tenant_id: str | None = None, actor: str = "system"
+    ) -> RunSnapshot:
+        snapshot = await self._store.get(run_id, tenant_id=tenant_id)
         if snapshot.status in TERMINAL_STATUSES:
             return snapshot
         await self._cancellations.request(run_id)
@@ -121,12 +160,17 @@ class ResearchApplicationService:
                 await task
             latest = await self._store.get(run_id)
             if latest.status is RunStatus.CANCELLED:
+                await self._record("research.cancelled", latest, actor)
                 return latest
             snapshot = latest
-        return await self._mark_cancelled(snapshot)
+        cancelled = await self._mark_cancelled(snapshot)
+        await self._record("research.cancelled", cancelled, actor)
+        return cancelled
 
-    async def resume(self, run_id: str) -> RunSnapshot:
-        snapshot = await self._store.get(run_id)
+    async def resume(
+        self, run_id: str, *, tenant_id: str | None = None, actor: str = "system"
+    ) -> RunSnapshot:
+        snapshot = await self._store.get(run_id, tenant_id=tenant_id)
         if snapshot.status in {RunStatus.COMPLETED, RunStatus.NEEDS_REVIEW}:
             return snapshot
         existing = self._tasks.get(run_id)
@@ -142,11 +186,19 @@ class ResearchApplicationService:
         await self._cancellations.clear(run_id)
         await self._store.save(pending)
         await self._events.publish(run_id, "resuming", {"status": RunStatus.PENDING.value})
+        await self._record("research.resumed", pending, actor)
         await self._dispatch(pending, resume=True)
         return pending
 
-    async def review(self, run_id: str, request: HumanReviewRequest) -> RunSnapshot:
-        snapshot = await self._store.get(run_id)
+    async def review(
+        self,
+        run_id: str,
+        request: HumanReviewRequest,
+        *,
+        tenant_id: str | None = None,
+        actor: str = "system",
+    ) -> RunSnapshot:
+        snapshot = await self._store.get(run_id, tenant_id=tenant_id)
         if snapshot.result is None:
             raise ReviewValidationError("run has no result to review")
         claim_ids = {item.claim_id for item in snapshot.result.claims}
@@ -173,12 +225,18 @@ class ResearchApplicationService:
                 "evidence_id": review.evidence_id,
             },
         )
+        await self._record(
+            "research.reviewed",
+            updated,
+            actor,
+            {"review_id": review.review_id, "decision": review.decision.value},
+        )
         return updated
 
     async def stream_events(
-        self, run_id: str, *, after_sequence: int = 0
+        self, run_id: str, *, after_sequence: int = 0, tenant_id: str | None = None
     ) -> AsyncIterator[RunEvent]:
-        snapshot = await self._store.get(run_id)
+        snapshot = await self._store.get(run_id, tenant_id=tenant_id)
         history = await self._events.history(run_id)
         if not history and snapshot.status in TERMINAL_STATUSES:
             yield RunEvent(
@@ -194,9 +252,14 @@ class ResearchApplicationService:
     async def metrics_summary(self) -> RuntimeSummary:
         return await self._observability.summary()
 
-    async def event_history(self, run_id: str) -> tuple[RunEvent, ...]:
-        await self._store.get(run_id)
+    async def event_history(
+        self, run_id: str, *, tenant_id: str | None = None
+    ) -> tuple[RunEvent, ...]:
+        await self._store.get(run_id, tenant_id=tenant_id)
         return await self._events.history(run_id)
+
+    async def audit_events(self, tenant_id: str, *, limit: int = 100) -> tuple[AuditEvent, ...]:
+        return await self._audit.list(tenant_id, limit=limit)
 
     async def close(self) -> None:
         tasks = tuple(self._tasks.values())
@@ -208,6 +271,7 @@ class ResearchApplicationService:
         if self._queue is not None:
             await self._queue.close()
         await self._cancellations.close()
+        await self._audit.close()
         await self._store.close()
         await self._workflow.close()
 
@@ -341,3 +405,20 @@ class ResearchApplicationService:
             {"status": RunStatus.CANCELLED.value},
         )
         return cancelled
+
+    async def _record(
+        self,
+        action: str,
+        snapshot: RunSnapshot,
+        actor: str,
+        details: dict[str, str | int | float | bool | None] | None = None,
+    ) -> None:
+        await self._audit.append(
+            AuditEvent(
+                tenant_id=snapshot.tenant_id,
+                actor=actor,
+                action=action,
+                run_id=snapshot.run_id,
+                details=details or {},
+            )
+        )

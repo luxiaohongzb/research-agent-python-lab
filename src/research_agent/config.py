@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     dispatch_mode: Literal["local", "redis"] = "local"
     cancellation_mode: Literal["memory", "redis"] = "memory"
     artifact_store_mode: Literal["memory", "s3"] = "memory"
+    auth_mode: Literal["disabled", "api_key"] = "disabled"
+    api_keys_json: str = "{}"
+    tenant_max_active_runs: int = Field(default=5, ge=1, le=1_000)
+    tenant_max_workers: int = Field(default=5, ge=1, le=5)
+    tenant_max_total_tokens: int = Field(default=1_000_000, ge=1_000, le=10_000_000)
+    tenant_max_cost_usd: float = Field(default=100.0, ge=0.01, le=1_000)
     reranker_mode: Literal["lexical", "cross_encoder"] = "lexical"
     openalex_email: str | None = None
     semantic_scholar_enabled: bool = False

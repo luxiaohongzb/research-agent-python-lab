@@ -371,6 +371,7 @@ class ResearchResult(FrozenModel):
 
 class RunSnapshot(FrozenModel):
     run_id: str
+    tenant_id: str = Field(default="default", min_length=1, max_length=100)
     status: RunStatus
     request: ResearchRequest
     idempotency_key: str | None = None

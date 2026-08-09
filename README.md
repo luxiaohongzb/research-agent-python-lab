@@ -2,6 +2,8 @@
 
 一个证据优先、预算受控、可核验的 Python 智能科研助理。项目用于学习 Agent 工程、准备面试，也可以继续演进为生产系统。
 
+**v1.0 已可交付：** 打开 `http://127.0.0.1:8000/workbench` 即可使用中文科研工作台；支持 API Key/RBAC、租户隔离、配额、审计、分布式 Worker 和失败死信流。部署、安全配置与验收步骤见 [产品交付手册](docs/product-delivery.md)。
+
 它不是“让一个模型无限搜索并直接写报告”的 Demo，而是把研究过程拆成可测试的状态图：
 
 ```text
@@ -37,6 +39,7 @@ Synthesize → Atomic Claims → Verify → Quality Gate
 - Prometheus 指标、运行质量摘要，以及可选 OpenTelemetry OTLP trace
 - Redis Streams 任务队列与事件日志、独立 Worker、执行租约和跨副本协作取消
 - AWS S3/MinIO Artifact Store，支持 run-scoped 隔离、分页统计与批量清理
+- 响应式科研工作台、API Key/RBAC、租户隔离、配额、审计日志与失败死信流
 - 24 条中英双语 golden cases，以及引用精度、覆盖率、支持率 CI 门禁
 
 ## 技术栈
@@ -62,7 +65,7 @@ research-agent "agentic RAG 如何提高科研综述的可信度"
 research-agent-server --reload
 ```
 
-打开 `http://127.0.0.1:8000/docs` 查看接口文档。
+打开 `http://127.0.0.1:8000/workbench` 使用产品工作台，或打开 `http://127.0.0.1:8000/docs` 查看接口文档。
 
 ### 同步执行
 
@@ -207,4 +210,4 @@ src/research_agent/
 
 ## 当前边界
 
-这是 Iteration 6：异步运行已从 API 进程拆到 Redis Streams consumer-group Worker，事件、取消信号和执行租约可跨副本共享，Artifact 可持久化到 S3/MinIO。当前仍缺少 OIDC/RBAC、多租户配额、审批 UI 和自动 Artifact 生命周期任务；Redis Streams 提供至少一次投递，系统依靠幂等 run、执行租约与终态检查收敛，不声称严格 exactly-once。hash embedding 与词法 reranker 是确定性工程基线，不代表 SOTA 语义效果；离线语料与 golden cases 用于验证架构和回归，不代表真实科学结论。
+v1.0 已完成可交付的 API Key/RBAC、租户配额与隔离、审计日志、科研工作台和失败死信流。面向公网的产品仍应在网关接入 OIDC、限流/WAF 和外部 Secret Manager，并补充 Artifact 定时生命周期任务。Redis Streams 提供至少一次投递，系统依靠幂等 run、执行租约与终态检查收敛，不声称严格 exactly-once。hash embedding 与词法 reranker 是确定性工程基线，不代表 SOTA 语义效果；离线语料与 golden cases 用于验证架构和回归，不代表真实科学结论。

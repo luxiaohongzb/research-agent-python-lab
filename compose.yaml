@@ -7,6 +7,9 @@ x-runtime-environment: &runtime-environment
   RESEARCH_AGENT_DISPATCH_MODE: redis
   RESEARCH_AGENT_CANCELLATION_MODE: redis
   RESEARCH_AGENT_ARTIFACT_STORE_MODE: s3
+  RESEARCH_AGENT_AUTH_MODE: ${RESEARCH_AGENT_AUTH_MODE:-disabled}
+  RESEARCH_AGENT_API_KEYS_JSON: ${RESEARCH_AGENT_API_KEYS_JSON:-{}}
+  RESEARCH_AGENT_TENANT_MAX_ACTIVE_RUNS: ${RESEARCH_AGENT_TENANT_MAX_ACTIVE_RUNS:-5}
   RESEARCH_AGENT_DATABASE_URL: postgresql://research:research@postgres:5432/research_agent
   RESEARCH_AGENT_REDIS_URL: redis://redis:6379/0
   RESEARCH_AGENT_S3_ENDPOINT_URL: http://minio:9000
@@ -32,6 +35,11 @@ services:
       - "8000:8000"
     environment: *runtime-environment
     depends_on: *runtime-dependencies
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   worker:
     image: research-agent-python-lab:local

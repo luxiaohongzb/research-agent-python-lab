@@ -85,6 +85,13 @@ class QueuedRun:
     resume: bool
 
 
+@dataclass(frozen=True)
+class DeadLetter:
+    message_id: str
+    run_id: str
+    error: str
+
+
 class RunQueue(Protocol):
     async def enqueue(self, run_id: str, *, resume: bool = False) -> str: ...
 
@@ -93,6 +100,10 @@ class RunQueue(Protocol):
     async def ack(self, job: QueuedRun) -> None: ...
 
     async def heartbeat(self, job: QueuedRun) -> None: ...
+
+    async def dead_letter(self, job: QueuedRun, error: str) -> None: ...
+
+    async def dead_letters(self, *, limit: int = 100) -> tuple[DeadLetter, ...]: ...
 
     async def close(self) -> None: ...
 
@@ -187,6 +198,7 @@ class RedisRunQueue:
         self._consumer_name = consumer_name
         self._group = group
         self._stream = f"{prefix}:queue:runs"
+        self._dead_letter_stream = f"{prefix}:queue:dead-letters"
         self._lease_ms = lease_seconds * 1_000
         self._client = client
         self._ready = False
@@ -240,6 +252,29 @@ class RedisRunQueue:
             min_idle_time=0,
             message_ids=[job.message_id],
             justid=True,
+        )
+
+    async def dead_letter(self, job: QueuedRun, error: str) -> None:
+        await self._get_client().xadd(
+            self._dead_letter_stream,
+            {"run_id": job.run_id, "error": error[:2_000]},
+            maxlen=10_000,
+            approximate=True,
+        )
+        await self.ack(job)
+
+    async def dead_letters(self, *, limit: int = 100) -> tuple[DeadLetter, ...]:
+        messages = await self._get_client().xrevrange(
+            self._dead_letter_stream,
+            count=limit,
+        )
+        return tuple(
+            DeadLetter(
+                message_id=str(message_id),
+                run_id=fields["run_id"],
+                error=fields.get("error", "unknown failure"),
+            )
+            for message_id, fields in messages
         )
 
     async def close(self) -> None:

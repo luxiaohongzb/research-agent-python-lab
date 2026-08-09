@@ -18,6 +18,7 @@ from research_agent.distributed import (
     RedisRunQueue,
     RunQueue,
 )
+from research_agent.domain import RunStatus
 from research_agent.events import RedisRunEventBroker
 from research_agent.observability import RuntimeObservability
 from research_agent.run_store import PostgresRunStore
@@ -83,7 +84,11 @@ class DistributedResearchWorker:
             await asyncio.gather(heartbeat, return_exceptions=True)
             await self._lease.release(job.run_id, owner)
             if completed:
-                await self._queue.ack(job)
+                snapshot = await self._service.get(job.run_id)
+                if snapshot.status is RunStatus.FAILED:
+                    await self._queue.dead_letter(job, snapshot.error or "research run failed")
+                else:
+                    await self._queue.ack(job)
         return True
 
     async def close(self) -> None:

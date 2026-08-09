@@ -55,6 +55,14 @@ async def test_redis_events_queue_cancellation_and_lease() -> None:
         await queue.heartbeat(job)
         await queue.ack(job)
 
+        await queue.enqueue("run-failed")
+        failed_job = await queue.receive(block_ms=100)
+        assert failed_job is not None
+        await queue.dead_letter(failed_job, "provider timeout")
+        dead_letters = await queue.dead_letters()
+        assert dead_letters[0].run_id == "run-failed"
+        assert dead_letters[0].error == "provider timeout"
+
         await cancellations.request("run-1")
         assert await cancellations.is_requested("run-1") is True
         await cancellations.clear("run-1")

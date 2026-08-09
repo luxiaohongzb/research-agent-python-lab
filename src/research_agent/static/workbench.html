@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="证据优先、声明可验证的智能科研助理工作台">
+  <title>Atlas Research · 科研工作台</title>
+  <link rel="stylesheet" href="/assets/workbench.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/workbench" aria-label="Atlas Research 首页">
+      <span class="brand-mark">A</span><span>ATLAS <b>RESEARCH</b></span>
+    </a>
+    <div class="top-actions">
+      <span class="health"><i></i> 服务就绪</span>
+      <button class="quiet" id="auth-open" type="button">访问密钥</button>
+      <a class="quiet link-button" href="/docs" target="_blank" rel="noreferrer">API 文档 ↗</a>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">EVIDENCE-FIRST RESEARCH AGENT</p>
+        <h1>从问题出发，抵达<br><em>可验证的结论。</em></h1>
+        <p class="lede">多源检索、原子声明、证据映射与逐项校验，在一个可审计的研究流程中完成。</p>
+      </div>
+      <div class="hero-note">
+        <span>工作原则 / 01</span>
+        <p>每一个结论都应能回到原始证据，而不是停留在模型的自信表达。</p>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <form class="composer panel" id="research-form">
+        <div class="panel-head"><span>新建研究</span><small>RESEARCH BRIEF</small></div>
+        <label for="question">你想研究什么？</label>
+        <textarea id="question" required minlength="5" maxlength="2000" placeholder="例如：比较 Agentic RAG 与传统 RAG 在复杂科研任务中的可靠性，并分析其评估方法。"></textarea>
+        <div class="preset-row" aria-label="问题示例">
+          <button type="button" data-prompt="系统梳理大语言模型科研智能体的关键技术路线、评估方法与主要局限。">科研智能体综述</button>
+          <button type="button" data-prompt="比较 Agentic RAG 与传统 RAG 在复杂科研任务中的可靠性及评估方法。">Agentic RAG</button>
+        </div>
+        <details>
+          <summary>研究预算与范围 <span>可选</span></summary>
+          <div class="settings-grid">
+            <label>论文上限<input id="max-papers" type="number" min="1" max="50" value="8"></label>
+            <label>迭代轮次<input id="max-iterations" type="number" min="1" max="5" value="2"></label>
+            <label>并行研究员<input id="max-workers" type="number" min="1" max="5" value="3"></label>
+            <label>费用上限 ($)<input id="max-cost" type="number" min="0.01" max="1000" step="0.01" value="5"></label>
+          </div>
+        </details>
+        <div class="submit-row">
+          <p>提交即进入可恢复的异步研究流程</p>
+          <button class="primary" id="submit" type="submit">开始研究 <span>→</span></button>
+        </div>
+      </form>
+
+      <aside class="run-panel panel">
+        <div class="panel-head"><span>运行状态</span><small id="run-id">尚未创建</small></div>
+        <div class="run-empty" id="run-empty">
+          <div class="orbit"><i></i></div>
+          <h2>等待研究任务</h2>
+          <p>任务事件、预算消耗和证据质量将在这里实时呈现。</p>
+        </div>
+        <div class="run-live hidden" id="run-live">
+          <div class="status-line"><span class="status" id="status">PENDING</span><span id="elapsed">准备中</span></div>
+          <div class="progress"><i id="progress-bar"></i></div>
+          <ol class="timeline" id="timeline" aria-live="polite"></ol>
+          <div class="run-actions">
+            <button class="quiet" id="cancel" type="button">取消任务</button>
+            <button class="quiet hidden" id="resume" type="button">恢复任务</button>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="results hidden" id="results">
+      <div class="result-heading">
+        <div><p class="eyebrow">RESEARCH OUTPUT</p><h2 id="report-title">研究报告</h2></div>
+        <div class="export-actions"><button id="bibtex" type="button">BibTeX ↓</button><button id="csl" type="button">CSL JSON ↓</button></div>
+      </div>
+      <div class="metrics" id="metrics"></div>
+      <div class="result-grid">
+        <article class="report panel"><pre id="report"></pre></article>
+        <aside class="claims panel"><div class="panel-head"><span>声明核验</span><small id="claim-count"></small></div><div id="claim-list"></div></aside>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="auth-dialog">
+    <form method="dialog">
+      <div class="panel-head"><span>访问密钥</span><button value="cancel" aria-label="关闭">×</button></div>
+      <p>生产模式需要 Bearer API Key。密钥只保存在当前浏览器标签页中。</p>
+      <label for="api-key">API Key</label>
+      <input id="api-key" type="password" autocomplete="off" placeholder="粘贴 API Key">
+      <button class="primary" id="auth-save" value="default">保存</button>
+    </form>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/assets/workbench.js" defer></script>
+</body>
+</html>
