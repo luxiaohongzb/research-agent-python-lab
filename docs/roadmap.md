@@ -1,0 +1,40 @@
+# 迭代路线
+
+## 已完成：MVP-1 可核验研究链路
+
+- LangGraph 条件循环与内存 checkpoint
+- 研究预算、离线语料、OpenAlex/Crossref adapters
+- Paper、Passage、EvidenceCard、AtomicClaim 数据链
+- 独立 Claim verifier 和质量门禁
+- FastAPI、CLI、Trace、离线指标与 CI
+
+## Iteration 2：结构化 LLM 与评测集
+
+- 基于 `with_structured_output` 实现 Planner、Extractor、Synthesizer、Verifier
+- 每个结构化输出增加语义校验和重试边界
+- 20–30 条中英双语 golden cases
+- citation precision、coverage、unsupported claim CI 门禁
+- 模型、prompt、token、费用和延迟版本记录
+
+## Iteration 3：全文和混合检索
+
+- GROBID sidecar：TEI 转结构化 Passage
+- PostgreSQL、pgvector HNSW 和全文索引
+- BM25、embedding、metadata、citation graph 四路召回与 RRF
+- Cross-encoder rerank 和来源多样性约束
+- Semantic Scholar 引用图与相似论文
+
+## Iteration 4：自适应多 Agent
+
+- Complexity Router：simple 使用单研究图，deep 才启用 Supervisor
+- 使用 LangGraph `Send` 并行 3–5 个独立 Research Worker
+- Artifact Store 交接 ID，不复制整段上下文
+- 每次运行设置 token、费用、时间、查询、论文与 Worker 数量上限
+
+## Iteration 5：生产工作台
+
+- PostgreSQL checkpoint、恢复、取消和幂等
+- SSE 进度、证据审阅、争议 Claim 与人工审批
+- OpenTelemetry、Prometheus、成本和质量看板
+- Zotero、BibTeX、CSL 和只读 MCP 连接器
+

@@ -1,0 +1,8 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      RESEARCH_AGENT_PROVIDER_MODE: offline
+
