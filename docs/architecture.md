@@ -6,10 +6,17 @@
 
 ```mermaid
 flowchart TD
-    A[ResearchRequest] --> B[Planner]
-    B --> C[Metadata and Citation Search]
-    B --> D[Keyword and Vector Search]
-    C --> E[RRF and Diversity Rerank]
+    A[ResearchRequest] --> B[Planner and Complexity Router]
+    B -->|simple| C[Single Research Graph]
+    B -->|deep| Q[Supervisor]
+    Q -->|LangGraph Send| R[Parallel Research Workers]
+    R --> S[Artifact IDs]
+    S --> T[Supervisor Merge]
+    C --> D[Keyword and Vector Search]
+    T --> D
+    C --> U[Metadata and Citation Search]
+    T --> U
+    U --> E[RRF and Diversity Rerank]
     D --> E
     E --> N[DOI and Title Dedup]
     N --> O[Full-text Passage or Abstract Fallback]
@@ -39,6 +46,7 @@ flowchart TD
 - `workflow.py`：LangGraph 节点、条件边、checkpoint、预算和门禁。
 - `application.py`：同步/异步用例和运行状态。
 - `api.py`：HTTP 边界，不承载业务规则。
+- `artifacts.py`：并行 Worker 的 run-scoped 大对象交接，图状态只保存引用。
 - `evaluation.py`：独立于运行链路的质量指标。
 
 ## 关键决策
@@ -79,6 +87,12 @@ BM25/`ts_rank_cd`、余弦相似度、元数据相关性和引用图信号的数
 ### 全文退化策略
 
 PDF 上传依次经过文件头/体积校验、GROBID 全文接口、TEI 解析和索引写入。研究查询优先使用命中的全文 Passage；没有全文命中时才从摘要生成 Passage。因此 GROBID 或数据库不可用不会破坏默认离线演示，但生产部署应为 GROBID 503 增加队列、熔断和异步重试。
+
+### 自适应多 Agent
+
+Planner 输出 `SIMPLE/DEEP`。简单请求继续进入原单图，只有可拆成多个独立搜索方向的深度请求才进入 Supervisor。Supervisor 在派发前同时计算查询、工具调用、Worker 和剩余墙钟时间容量，然后用 LangGraph `Send` 创建并行 Worker。
+
+Worker 不直接更新共享 `papers/passages`，而是把 `RetrievalBatch` 写入 Artifact Store，只返回 `ResearchWorkerResult`。该对象包含 Worker/Task ID、ArtifactRef、状态、耗时和错误类型。汇总节点串行读取同一 run 的 Artifact、统一扣减预算并执行去重，规避并行 state channel 冲突和上下文复制。
 
 ### 安全边界
 

@@ -36,6 +36,26 @@ async def test_unknown_run_returns_404() -> None:
 
 
 @pytest.mark.asyncio
+async def test_deep_research_api_exposes_bounded_worker_results() -> None:
+    transport = httpx.ASGITransport(app=create_app(build_default_workflow()))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/research/run",
+            json={
+                "question": "Compare agentic RAG and claim verification approaches",
+                "max_iterations": 1,
+                "max_workers": 2,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["workers"]) == 2
+    assert payload["budget"]["used_workers"] == 2
+    assert all(item["artifact_ref"]["artifact_id"] for item in payload["workers"])
+
+
+@pytest.mark.asyncio
 async def test_pdf_ingestion_endpoint_indexes_structured_passages() -> None:
     tei = (Path(__file__).parent / "fixtures" / "sample.tei.xml").read_bytes()
     grobid_http = httpx.AsyncClient(

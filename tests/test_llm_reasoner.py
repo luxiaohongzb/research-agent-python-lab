@@ -19,15 +19,28 @@ from research_agent.workflow import ResearchWorkflow
 
 
 class ScriptedRunnable:
-    def __init__(self, schema: type[Any], *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        schema: type[Any],
+        *,
+        fail: bool = False,
+        input_tokens: int = 10,
+        output_tokens: int = 5,
+    ) -> None:
         self._schema = schema
         self._fail = fail
+        self._input_tokens = input_tokens
+        self._output_tokens = output_tokens
 
     async def ainvoke(self, messages: list[Any]) -> dict[str, Any]:
         raw = AIMessage(
             content="",
             response_metadata={"model_name": "fake-structured-model"},
-            usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            usage_metadata={
+                "input_tokens": self._input_tokens,
+                "output_tokens": self._output_tokens,
+                "total_tokens": self._input_tokens + self._output_tokens,
+            },
         )
         if self._fail:
             return {"raw": raw, "parsed": None, "parsing_error": ValueError("invalid schema")}
@@ -87,11 +100,24 @@ class ScriptedRunnable:
 
 
 class ScriptedModel:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        input_tokens: int = 10,
+        output_tokens: int = 5,
+    ) -> None:
         self._fail = fail
+        self._input_tokens = input_tokens
+        self._output_tokens = output_tokens
 
     def with_structured_output(self, schema: type[Any], **_: Any) -> ScriptedRunnable:
-        return ScriptedRunnable(schema, fail=self._fail)
+        return ScriptedRunnable(
+            schema,
+            fail=self._fail,
+            input_tokens=self._input_tokens,
+            output_tokens=self._output_tokens,
+        )
 
 
 @pytest.mark.asyncio
@@ -118,6 +144,12 @@ async def test_structured_reasoner_runs_end_to_end_and_records_model_calls() -> 
     assert all(item.prompt_version == PROMPT_VERSION for item in result.model_invocations)
     assert all(item.input_tokens == 10 for item in result.model_invocations)
     assert all(item.estimated_cost_usd == 0.00002 for item in result.model_invocations)
+    assert result.budget.used_total_tokens == sum(
+        (item.input_tokens or 0) + (item.output_tokens or 0) for item in result.model_invocations
+    )
+    assert result.budget.estimated_cost_usd == pytest.approx(
+        sum(item.estimated_cost_usd or 0 for item in result.model_invocations)
+    )
     assert all(item.status is VerificationStatus.SUPPORTED for item in result.verifications)
 
 
@@ -136,3 +168,29 @@ async def test_structured_failure_is_recorded_before_deterministic_fallback() ->
     assert len(result.model_invocations) == 2
     assert all(not item.success for item in result.model_invocations)
     assert result.warnings == ("plan: structured model failed; deterministic fallback used.",)
+
+
+@pytest.mark.asyncio
+async def test_model_budget_switches_remaining_stages_to_deterministic_baseline() -> None:
+    reasoner = LangChainStructuredReasoner(
+        ScriptedModel(input_tokens=400, output_tokens=200),
+        provider="fake",
+        model_name="fake-structured-model",
+    )
+    workflow = ResearchWorkflow(
+        provider=CompositePaperProvider((OfflinePaperProvider(),)),
+        reasoner=reasoner,
+    )
+
+    result = await workflow.run(
+        ResearchRequest(
+            question="How should a research agent verify claims?",
+            max_total_tokens=1_000,
+        )
+    )
+
+    assert result.status is RunStatus.NEEDS_REVIEW
+    assert result.budget.used_total_tokens == 1_200
+    assert len(result.model_invocations) == 2
+    assert "tokens" in result.budget.exhausted_limits
+    assert any("Run limits reached" in warning for warning in result.warnings)

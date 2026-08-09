@@ -15,7 +15,11 @@ Synthesize → Atomic Claims → Verify → Quality Gate
 ## 已实现
 
 - LangGraph 条件工作流、checkpoint 和有上限的补充检索循环
+- Complexity Router：简单问题走单图，复杂问题才进入 Supervisor + 并行 Worker
+- LangGraph `Send` 动态派发 1–5 个 Worker，Worker 失败与超时相互隔离
+- Artifact Store 只在图状态中传引用，避免检索结果复制进每个 Worker 上下文
 - `ResearchBudget`：限制查询数、论文数、迭代数和工具调用
+- Token、费用、墙钟时间与 Worker 数量的运行级预算和最终留痕
 - `Paper → Passage → EvidenceCard → AtomicClaim → VerificationResult` 可追溯链路
 - `SUPPORTED / PARTIAL / CONFLICT / UNSUPPORTED` Claim-level 核验
 - 离线可复现语料，以及可选 OpenAlex、Crossref、Semantic Scholar 实时检索
@@ -60,7 +64,7 @@ uvicorn research_agent.api:app --reload
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/research/run \
   -H "Content-Type: application/json" \
-  -d '{"question":"How does claim-level verification improve research agents?"}'
+  -d '{"question":"How does claim-level verification improve research agents?","max_workers":3,"max_total_tokens":100000,"max_cost_usd":5,"max_elapsed_seconds":300}'
 ```
 
 ### 异步任务
@@ -145,6 +149,7 @@ RESEARCH_AGENT_MODEL_OUTPUT_COST_PER_MILLION_USD=...
 ```text
 src/research_agent/
 ├── api.py                 FastAPI 与异步任务接口
+├── artifacts.py           Worker 间的大对象引用存储
 ├── application.py         用例编排与运行存储
 ├── config.py              环境配置
 ├── domain.py              科研领域契约
@@ -161,7 +166,7 @@ src/research_agent/
 └── workflow.py            LangGraph 状态图和质量门禁
 ```
 
-详细设计见 [架构说明](docs/architecture.md)，混合检索实践见 [全文检索指南](docs/hybrid-retrieval.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
+详细设计见 [架构说明](docs/architecture.md)，多 Agent 实践见 [Supervisor 指南](docs/multi-agent.md)，混合检索实践见 [全文检索指南](docs/hybrid-retrieval.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
 
 ## 设计原则
 
@@ -173,4 +178,4 @@ src/research_agent/
 
 ## 当前边界
 
-这是 Iteration 3：全文 PDF 解析、pgvector 和引用图检索已形成可运行基础链路。当前 hash embedding 与词法 reranker 是确定性工程基线，不代表 SOTA 语义效果；多 Worker fan-out、持久化 checkpoint、模型化科学 embedding、权限控制和人工审批 UI 位于后续路线。离线语料与 golden cases 用于验证架构和回归，不代表真实科学结论。
+这是 Iteration 4：全文混合检索和自适应多 Agent 已形成可运行基础链路。当前 Artifact Store 与 checkpoint 都是进程内实现，hash embedding 与词法 reranker 是确定性工程基线，不代表 SOTA 语义效果；持久化 checkpoint/Artifact Store、领域 embedding、权限控制和人工审批 UI 位于后续路线。离线语料与 golden cases 用于验证架构和回归，不代表真实科学结论。

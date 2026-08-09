@@ -13,6 +13,10 @@ def main() -> None:
     parser.add_argument("question", help="Research question")
     parser.add_argument("--max-papers", type=int, default=8)
     parser.add_argument("--max-iterations", type=int, default=2)
+    parser.add_argument("--max-workers", type=int, default=3)
+    parser.add_argument("--max-total-tokens", type=int, default=100_000)
+    parser.add_argument("--max-cost-usd", type=float, default=5.0)
+    parser.add_argument("--max-elapsed-seconds", type=float, default=300.0)
     parser.add_argument("--json", action="store_true", help="Print the complete JSON result")
     args = parser.parse_args()
     result = asyncio.run(
@@ -21,6 +25,10 @@ def main() -> None:
                 question=args.question,
                 max_papers=args.max_papers,
                 max_iterations=args.max_iterations,
+                max_workers=args.max_workers,
+                max_total_tokens=args.max_total_tokens,
+                max_cost_usd=args.max_cost_usd,
+                max_elapsed_seconds=args.max_elapsed_seconds,
             )
         )
     )

@@ -32,3 +32,5 @@ CI 在 Python 3.11 和 3.13 上执行相同门禁。失败命令返回非零退�
 ## 使用边界
 
 离线数据集验证的是确定性管线、不变量和回归稳定性，不代表真实科研质量。接入全文检索后，应加入人工标注的 Recall@K、nDCG、passage entailment、conflict recall 和 limitation capture；接入真实模型后应固定 model、prompt version 和数据快照，并将模型评审与人工抽审结合。
+
+Iteration 4 额外输出 `worker_utilization`，即 `used_workers / max_workers`。它不是越高越好：简单问题应为 0，只有 DEEP 问题才应消耗 Worker 预算。并发回归测试还会测量 provider 的峰值并发，避免“代码看起来 fan-out，实际串行执行”。

@@ -17,6 +17,8 @@ async def test_workflow_produces_traceable_supported_claims() -> None:
     assert len(result.claims) == len(result.verifications)
     assert all(item.evidence_ids for item in result.claims)
     assert all(item.status is VerificationStatus.SUPPORTED for item in result.verifications)
+    assert result.workers == ()
+    assert result.budget.used_workers == 0
     assert [event.node for event in result.trace] == [
         "plan",
         "search",

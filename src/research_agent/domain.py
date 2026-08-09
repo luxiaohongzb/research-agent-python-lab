@@ -42,6 +42,10 @@ class ResearchRequest(FrozenModel):
     question: str = Field(min_length=5, max_length=2_000)
     max_papers: int = Field(default=8, ge=1, le=50)
     max_iterations: int = Field(default=2, ge=1, le=5)
+    max_workers: int = Field(default=3, ge=1, le=5)
+    max_total_tokens: int = Field(default=100_000, ge=1_000, le=10_000_000)
+    max_cost_usd: float = Field(default=5.0, ge=0.01, le=1_000)
+    max_elapsed_seconds: float = Field(default=300.0, ge=1, le=3_600)
     year_from: int | None = Field(default=None, ge=1900, le=2100)
     year_to: int | None = Field(default=None, ge=1900, le=2100)
 
@@ -57,24 +61,71 @@ class ResearchBudget(FrozenModel):
     max_papers: int = Field(default=8, ge=1)
     max_iterations: int = Field(default=2, ge=1)
     max_tool_calls: int = Field(default=12, ge=1)
+    max_workers: int = Field(default=3, ge=1, le=5)
+    max_total_tokens: int = Field(default=100_000, ge=1_000)
+    max_cost_usd: float = Field(default=5.0, ge=0.01)
+    max_elapsed_seconds: float = Field(default=300.0, ge=1)
     used_queries: int = Field(default=0, ge=0)
     used_tool_calls: int = Field(default=0, ge=0)
+    used_workers: int = Field(default=0, ge=0)
+    used_total_tokens: int = Field(default=0, ge=0)
+    estimated_cost_usd: float = Field(default=0.0, ge=0)
+    elapsed_ms: int = Field(default=0, ge=0)
 
     @property
     def remaining_queries(self) -> int:
         return max(0, self.max_queries - self.used_queries)
 
-    def consume(self, *, queries: int = 0, tool_calls: int = 0) -> ResearchBudget:
+    @property
+    def remaining_workers(self) -> int:
+        return max(0, self.max_workers - self.used_workers)
+
+    @property
+    def exhausted_limits(self) -> tuple[str, ...]:
+        exhausted: list[str] = []
+        if self.used_total_tokens >= self.max_total_tokens:
+            exhausted.append("tokens")
+        if self.estimated_cost_usd >= self.max_cost_usd:
+            exhausted.append("cost")
+        if self.elapsed_ms >= int(self.max_elapsed_seconds * 1_000):
+            exhausted.append("time")
+        return tuple(exhausted)
+
+    def consume(
+        self,
+        *,
+        queries: int = 0,
+        tool_calls: int = 0,
+        workers: int = 0,
+    ) -> ResearchBudget:
         if self.used_queries + queries > self.max_queries:
             raise BudgetExceededError("query budget exhausted")
         if self.used_tool_calls + tool_calls > self.max_tool_calls:
             raise BudgetExceededError("tool-call budget exhausted")
+        if self.used_workers + workers > self.max_workers:
+            raise BudgetExceededError("worker budget exhausted")
         return self.model_copy(
             update={
                 "used_queries": self.used_queries + queries,
                 "used_tool_calls": self.used_tool_calls + tool_calls,
+                "used_workers": self.used_workers + workers,
             }
         )
+
+    def record_usage(
+        self,
+        *,
+        tokens: int = 0,
+        estimated_cost_usd: float = 0,
+        elapsed_ms: int | None = None,
+    ) -> ResearchBudget:
+        updates: dict[str, int | float] = {
+            "used_total_tokens": self.used_total_tokens + tokens,
+            "estimated_cost_usd": self.estimated_cost_usd + estimated_cost_usd,
+        }
+        if elapsed_ms is not None:
+            updates["elapsed_ms"] = elapsed_ms
+        return self.model_copy(update=updates)
 
 
 class BudgetExceededError(RuntimeError):
@@ -182,6 +233,41 @@ class RetrievalHit(FrozenModel):
     final_rank: int = Field(ge=1)
 
 
+class ArtifactKind(StrEnum):
+    RETRIEVAL_BATCH = "RETRIEVAL_BATCH"
+
+
+class ArtifactRef(FrozenModel):
+    artifact_id: str
+    run_id: str
+    kind: ArtifactKind
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class WorkerStatus(StrEnum):
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    TIMED_OUT = "TIMED_OUT"
+
+
+class ResearchWorkerResult(FrozenModel):
+    worker_id: str
+    task_id: str
+    sub_question: str
+    status: WorkerStatus
+    artifact_ref: ArtifactRef | None = None
+    elapsed_ms: int = Field(ge=0)
+    error_type: str | None = None
+
+
+class ResearchWorkerAssignment(FrozenModel):
+    worker_id: str
+    run_id: str
+    task: SearchTask
+    max_papers: int = Field(ge=1)
+    timeout_seconds: float = Field(gt=0)
+
+
 class AtomicClaim(FrozenModel):
     claim_id: str = Field(default_factory=lambda: f"claim-{uuid4().hex[:12]}")
     text: str
@@ -246,6 +332,7 @@ class ResearchResult(FrozenModel):
     report: ResearchReport
     trace: tuple[TraceEvent, ...]
     model_invocations: tuple[ModelInvocation, ...] = ()
+    workers: tuple[ResearchWorkerResult, ...] = ()
     warnings: tuple[str, ...] = ()
 
 

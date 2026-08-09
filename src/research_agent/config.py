@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     grobid_url: str = "http://127.0.0.1:8070"
     grobid_timeout_seconds: float = Field(default=120.0, gt=0, le=300)
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    worker_timeout_seconds: float = Field(default=45.0, gt=0, le=300)
     request_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
     default_max_papers: int = Field(default=8, ge=1, le=50)
     default_max_iterations: int = Field(default=2, ge=1, le=5)

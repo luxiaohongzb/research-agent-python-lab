@@ -28,12 +28,14 @@
 
 额外交付：PDF 上传 API、解析与内容版本留痕、内存降级索引、真实 pgvector 容器集成测试、可选 cross-encoder 依赖隔离。当前 Semantic Scholar 实现覆盖搜索、引用和参考文献邻域；官方 recommendation endpoint 可在相关性评测集准备完成后接入。
 
-## Iteration 4：自适应多 Agent
+## 已完成：Iteration 4 自适应多 Agent
 
 - Complexity Router：simple 使用单研究图，deep 才启用 Supervisor
 - 使用 LangGraph `Send` 并行 3–5 个独立 Research Worker
 - Artifact Store 交接 ID，不复制整段上下文
 - 每次运行设置 token、费用、时间、查询、论文与 Worker 数量上限
+
+额外交付：Worker 超时与失败隔离、运行级 Artifact 引用鉴权、并发峰值回归测试、Worker 结果与多维预算进入 API 输出和 Trace。当前 Artifact Store 为有容量上限的内存实现，Iteration 5 再迁移到持久化存储并增加生命周期清理。
 
 ## Iteration 5：生产工作台
 

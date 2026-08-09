@@ -17,6 +17,7 @@ class EvaluationMetrics(BaseModel):
     supported_claim_rate: float = Field(ge=0, le=1)
     source_diversity: int = Field(ge=0)
     budget_utilization: float = Field(ge=0, le=1)
+    worker_utilization: float = Field(ge=0, le=1)
 
 
 class GoldenCase(BaseModel):
@@ -69,6 +70,7 @@ def evaluate_result(result: ResearchResult) -> EvaluationMetrics:
         supported_claim_rate=supported_rate,
         source_diversity=len({paper.source for paper in result.papers}),
         budget_utilization=result.budget.used_queries / result.budget.max_queries,
+        worker_utilization=result.budget.used_workers / result.budget.max_workers,
     )
 
 

@@ -15,12 +15,18 @@
 7. 可观测 fallback：单阶段模型失败不会丢掉整个 run，失败次数、错误类型、token、延迟和 prompt 版本会保留。
 8. 混合检索不直接相加原始分数：四路召回先各自排序，再用 RRF 融合，候选集最后做 cross-encoder/来源多样性重排。
 9. 全文引用不是字符串拼接：GROBID TEI 被解析为带章节、页码、坐标、版本和哈希的 Passage，证据可回到 PDF 位置。
+10. 自适应 fan-out：只有 `DEEP` 问题才用 `Send` 并行派发 Worker，简单问题不支付协调成本。
+11. Worker 传 Artifact ID 而非全文，Supervisor 是唯一归并点；超时或失败 Worker 不影响其他分支。
 
 ## 常见追问
 
 ### 为什么不是所有问题都启动多 Agent？
 
 多 Agent 适合能拆成独立方向的广度任务，但协调和 token 成本高。项目先用复杂度路由，简单问题走单图，深度问题才 fan-out，并限制 Worker 数和轮数。
+
+### 并行 Worker 如何避免状态冲突？
+
+Worker 不写共享论文数组。每个 Worker 把检索批次放进 Artifact Store，通过带 run ID 的引用交给 Supervisor；只有 Supervisor Merge 节点读取并归并。LangGraph state 中的 WorkerResult 使用 reducer 聚合，因此并发完成顺序不会覆盖其他分支。
 
 ### 当前 verifier 可靠吗？
 
@@ -32,4 +38,4 @@ JSON Schema 只能保证字段和类型正确，不能保证 evidence ID 真正�
 
 ### 如何进入生产？
 
-全文解析和 BM25 + pgvector + citation graph + reranker 已形成基础链路。下一步将内存 checkpoint 换成 PostgreSQL，加入领域 embedding 评测、幂等、限流、熔断、OpenTelemetry 和人工审批。
+全文检索和自适应多 Agent 已形成基础链路。下一步将内存 checkpoint/Artifact Store 换成持久化实现，加入领域 embedding 评测、幂等、取消、限流、熔断、OpenTelemetry 和人工审批。
