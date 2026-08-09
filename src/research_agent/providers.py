@@ -31,7 +31,12 @@ _SEARCH_STOPWORDS = frozenset(
 
 def tokenize(text: str) -> set[str]:
     latin = re.findall(r"[a-z0-9]+", text.lower())
-    cjk = re.findall(r"[\u4e00-\u9fff]", text)
+    cjk_segments = re.findall(r"[\u4e00-\u9fff]+", text)
+    cjk = [
+        segment[index : index + 2]
+        for segment in cjk_segments
+        for index in range(max(1, len(segment) - 1))
+    ]
     return {
         token
         for token in (*latin, *cjk)
@@ -255,7 +260,8 @@ def default_offline_papers() -> tuple[Paper, ...]:
             "Agentic Retrieval-Augmented Generation for Scientific Synthesis",
             "Agentic RAG iteratively plans searches, retrieves scientific passages, and "
             "reflects on evidence coverage. Bounded retrieval loops improve coverage while "
-            "explicit stopping conditions control cost and latency.",
+            "explicit stopping conditions control cost and latency. 智能体检索通过有界循环提高"
+            "科研综述覆盖度，并用停止条件控制成本。",
             2025,
             "10.5555/agentic-rag",
         ),
@@ -263,7 +269,8 @@ def default_offline_papers() -> tuple[Paper, ...]:
             "Claim-Level Citation Verification in Long-Form Research Reports",
             "Claim-level verification links each atomic claim to exact source passages. "
             "Separating report generation from verification improves citation faithfulness "
-            "and exposes unsupported or conflicting statements.",
+            "and exposes unsupported or conflicting statements. 声明级引用核验把原子结论"
+            "绑定到来源段落，并识别不受支持或冲突的陈述。",
             2026,
             "10.5555/claim-verification",
         ),
@@ -271,7 +278,8 @@ def default_offline_papers() -> tuple[Paper, ...]:
             "Budget-Aware Multi-Agent Systems for Deep Research",
             "Parallel research workers increase breadth on decomposable questions, but "
             "coordination and token costs rise quickly. A complexity router should reserve "
-            "multi-agent execution for high-value tasks with independent subquestions.",
+            "multi-agent execution for high-value tasks with independent subquestions. "
+            "预算感知的多智能体系统只为可分解的高价值任务启动并行研究者。",
             2026,
             "10.5555/budget-multi-agent",
         ),
@@ -279,7 +287,8 @@ def default_offline_papers() -> tuple[Paper, ...]:
             "Evidence Cards: Provenance-Preserving Scientific Question Answering",
             "Evidence cards preserve paper identity, source passages, study context, "
             "limitations, and extraction metadata. Provenance-first data models make "
-            "scientific answers auditable and enable deterministic citation rendering.",
+            "scientific answers auditable and enable deterministic citation rendering. "
+            "证据卡片保存论文身份、来源段落、研究背景、局限与抽取元数据。",
             2025,
             "10.5555/evidence-cards",
         ),

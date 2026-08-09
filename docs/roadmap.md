@@ -8,7 +8,7 @@
 - 独立 Claim verifier 和质量门禁
 - FastAPI、CLI、Trace、离线指标与 CI
 
-## Iteration 2：结构化 LLM 与评测集
+## 已完成：Iteration 2 结构化 LLM 与评测集
 
 - 基于 `with_structured_output` 实现 Planner、Extractor、Synthesizer、Verifier
 - 每个结构化输出增加语义校验和重试边界
@@ -16,7 +16,9 @@
 - citation precision、coverage、unsupported claim CI 门禁
 - 模型、prompt、token、费用和延迟版本记录
 
-## Iteration 3：全文和混合检索
+额外交付：阶段级确定性 fallback、中文 bigram 检索、域外问题拒答门禁、Mypy strict CI。
+
+## 下一步：Iteration 3 全文和混合检索
 
 - GROBID sidecar：TEI 转结构化 Passage
 - PostgreSQL、pgvector HNSW 和全文索引

@@ -1,0 +1,34 @@
+# 评测指南
+
+## 目标
+
+评测不是给最终报告打一个模糊总分，而是判断系统是否在正确边界内完成任务。当前数据集包含 24 条中英双语案例：14 条可回答任务和 10 条域外或无答案任务。
+
+## 运行
+
+```bash
+research-agent-eval datasets/golden.jsonl --min-pass-rate 1.0
+```
+
+CI 在 Python 3.11 和 3.13 上执行相同门禁。失败命令返回非零退出码。
+
+## Case 契约
+
+每行是一个 JSON 对象，包含：
+
+- `case_id`：稳定且唯一的案例 ID；
+- `language`：`en` 或 `zh`；
+- `question`：研究问题；
+- `expected_status`：`COMPLETED` 或 `NEEDS_REVIEW`；
+- `min_papers`、`min_claims`：最低覆盖要求；
+- `min_citation_precision`：Claim 引用的 EvidenceCard 是否真实存在；
+- `min_citation_coverage`：有引用的 Claim 比例；
+- `min_supported_claim_rate`：Verifier 判为 `SUPPORTED` 的比例。
+
+## 当前门禁
+
+可回答案例要求至少两篇论文、两个 Claim，并达到 100% citation precision、citation coverage 和 supported claim rate。无答案案例要求最终状态为 `NEEDS_REVIEW`；允许检索阶段出现弱相关候选，但覆盖度门禁不能让单一来源升级为完成报告。
+
+## 使用边界
+
+离线数据集验证的是确定性管线、不变量和回归稳定性，不代表真实科研质量。接入全文检索后，应加入人工标注的 Recall@K、nDCG、passage entailment、conflict recall 和 limitation capture；接入真实模型后应固定 model、prompt version 和数据快照，并将模型评审与人工抽审结合。

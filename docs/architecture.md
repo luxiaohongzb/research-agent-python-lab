@@ -25,7 +25,9 @@ flowchart TD
 
 - `domain.py`：稳定的科研数据契约，不依赖框架。
 - `providers.py`：外部学术检索端口和适配器，失败隔离、DOI/标题归并。
-- `reasoner.py`：规划、证据抽取、综合和验证策略。默认确定性实现保证离线复现。
+- `reasoner.py`：规划、证据抽取、综合和验证端口。默认确定性实现保证离线复现。
+- `llm_reasoner.py`：原生 JSON Schema 输出、语义后校验、调用指标和阶段级 fallback。
+- `prompts.py`：四个职责隔离且有版本号的系统提示词。
 - `workflow.py`：LangGraph 节点、条件边、checkpoint、预算和门禁。
 - `application.py`：同步/异步用例和运行状态。
 - `api.py`：HTTP 边界，不承载业务规则。
@@ -40,6 +42,18 @@ flowchart TD
 ### 为什么默认使用离线 reasoner
 
 项目首先需要可重复的架构基线。离线实现使 CI 不依赖密钥、模型版本和远端限流。接入 LLM 后必须继续通过同一组领域契约和评测门槛。
+
+### 结构化模型边界
+
+四个模型阶段分别使用 `PlanOutput`、`EvidenceOutput`、`SynthesisOutput` 和 `VerificationOutput`，不能互相越权。Provider 原生 schema 只保证 JSON 形状，代码还会检查：
+
+- 查询数量、空值和研究范围；
+- EvidenceCard 的 passage ID 由系统注入；
+- Claim 引用的 evidence ID 必须属于输入白名单；
+- Verifier 只能看到 Claim 绑定的 Passage；
+- 置信度范围、空 Claim、未知引用等语义不变量。
+
+每次调用产生 `ModelInvocation`，保存 stage、provider、model、prompt version、latency、token、费用估算和错误类型。价格由运行配置提供，避免在代码中冻结易变信息。结构化或语义验证连续失败两次后，只回退当前阶段，并把失败记录带入最终结果。
 
 ### 状态与 Artifact
 

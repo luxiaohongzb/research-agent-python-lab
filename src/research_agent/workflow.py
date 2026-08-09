@@ -12,6 +12,7 @@ from research_agent.config import Settings, get_settings
 from research_agent.domain import (
     AtomicClaim,
     EvidenceCard,
+    ModelInvocation,
     Paper,
     Passage,
     ResearchBudget,
@@ -53,6 +54,7 @@ class ResearchState(TypedDict, total=False):
     iteration: int
     trace: list[dict[str, Any]]
     warnings: list[str]
+    model_invocations: list[dict[str, Any]]
 
 
 class ResearchWorkflow:
@@ -92,6 +94,7 @@ class ResearchWorkflow:
             "iteration": 1,
             "trace": [],
             "warnings": [],
+            "model_invocations": [],
         }
         final = await self.graph.ainvoke(
             initial,
@@ -133,10 +136,12 @@ class ResearchWorkflow:
 
     async def _plan(self, state: ResearchState) -> dict[str, Any]:
         request = ResearchRequest.model_validate(state["request"])
-        plan = await self._reasoner.plan(request)
+        reasoned = await self._reasoner.plan(request)
+        plan = reasoned.value
         return {
             "plan": plan.model_dump(mode="json"),
             "pending_tasks": [task.model_dump(mode="json") for task in plan.search_tasks],
+            **_reasoned_updates(state, (reasoned,)),
             "trace": _trace(state, "plan", f"Created {len(plan.search_tasks)} search tasks."),
         }
 
@@ -201,16 +206,17 @@ class ResearchWorkflow:
             if paper.abstract.strip()
         )
         paper_by_id = {paper.paper_id: paper for paper in papers}
-        cards = await asyncio.gather(
+        reasoned_cards = await asyncio.gather(
             *(
                 self._reasoner.extract_evidence(question, paper_by_id[passage.paper_id], passage)
                 for passage in passages
             )
         )
-        evidence = tuple(card for card in cards if card is not None)
+        evidence = tuple(item.value for item in reasoned_cards if item.value is not None)
         return {
             "passages": [passage.model_dump(mode="json") for passage in passages],
             "evidence": [card.model_dump(mode="json") for card in evidence],
+            **_reasoned_updates(state, reasoned_cards),
             "trace": _trace(state, "extract_evidence", f"Created {len(evidence)} evidence cards."),
         }
 
@@ -256,10 +262,12 @@ class ResearchWorkflow:
         question = ResearchRequest.model_validate(state["request"]).question
         papers = tuple(Paper.model_validate(item) for item in state.get("papers", []))
         evidence = tuple(EvidenceCard.model_validate(item) for item in state.get("evidence", []))
-        report, claims = await self._reasoner.synthesize(question, papers, evidence)
+        reasoned = await self._reasoner.synthesize(question, papers, evidence)
+        report, claims = reasoned.value
         return {
             "report": report.model_dump(mode="json"),
             "claims": [claim.model_dump(mode="json") for claim in claims],
+            **_reasoned_updates(state, (reasoned,)),
             "trace": _trace(state, "synthesize", f"Drafted a report with {len(claims)} claims."),
         }
 
@@ -278,11 +286,13 @@ class ResearchWorkflow:
         claims = tuple(AtomicClaim.model_validate(item) for item in state.get("claims", []))
         evidence = tuple(EvidenceCard.model_validate(item) for item in state.get("evidence", []))
         passages = tuple(Passage.model_validate(item) for item in state.get("passages", []))
-        results = await asyncio.gather(
+        reasoned_results = await asyncio.gather(
             *(self._reasoner.verify(claim, evidence, passages) for claim in claims)
         )
+        results = tuple(item.value for item in reasoned_results)
         return {
             "verifications": [result.model_dump(mode="json") for result in results],
+            **_reasoned_updates(state, reasoned_results),
             "trace": _trace(state, "verify", f"Verified {len(results)} claims independently."),
         }
 
@@ -325,7 +335,39 @@ def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow
                 CrossrefPaperProvider(client=client, email=current.openalex_email),
             )
         )
-    return ResearchWorkflow(provider=CompositePaperProvider(tuple(providers)))
+    reasoner: ResearchReasoner = DeterministicReasoner()
+    if current.reasoner_mode == "openai":
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError as exc:
+            raise RuntimeError(
+                'OpenAI mode requires: python -m pip install -e ".[openai]"'
+            ) from exc
+        from research_agent.llm_reasoner import (
+            FallbackResearchReasoner,
+            LangChainStructuredReasoner,
+        )
+
+        model = ChatOpenAI(
+            model=current.model,
+            timeout=current.model_timeout_seconds,
+            max_retries=current.model_max_retries,
+            use_responses_api=True,
+            output_version="responses/v1",
+        )
+        reasoner = FallbackResearchReasoner(
+            LangChainStructuredReasoner(
+                model,
+                provider="openai",
+                model_name=current.model,
+                input_cost_per_million_usd=current.model_input_cost_per_million_usd,
+                output_cost_per_million_usd=current.model_output_cost_per_million_usd,
+            )
+        )
+    return ResearchWorkflow(
+        provider=CompositePaperProvider(tuple(providers)),
+        reasoner=reasoner,
+    )
 
 
 def _trace(
@@ -354,5 +396,22 @@ def _to_result(state: ResearchState) -> ResearchResult:
         ),
         report=ResearchReport.model_validate(state["report"]),
         trace=tuple(TraceEvent.model_validate(item) for item in state.get("trace", [])),
+        model_invocations=tuple(
+            ModelInvocation.model_validate(item) for item in state.get("model_invocations", [])
+        ),
         warnings=tuple(state.get("warnings", [])),
     )
+
+
+def _reasoned_updates(state: ResearchState, outputs: tuple[Any, ...] | list[Any]) -> dict[str, Any]:
+    invocations = [
+        ModelInvocation.model_validate(item) for item in state.get("model_invocations", [])
+    ]
+    warnings = list(state.get("warnings", []))
+    for output in outputs:
+        invocations.extend(output.model_invocations)
+        warnings.extend(output.warnings)
+    return {
+        "model_invocations": [item.model_dump(mode="json") for item in invocations],
+        "warnings": warnings,
+    }

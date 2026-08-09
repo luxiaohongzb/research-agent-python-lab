@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import re
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Generic, Protocol, TypeVar
 
 from research_agent.domain import (
     AtomicClaim,
     Complexity,
     EvidenceCard,
     EvidenceType,
+    ModelInvocation,
     Paper,
     Passage,
     ReportSection,
@@ -20,33 +22,42 @@ from research_agent.domain import (
 )
 from research_agent.providers import relevance, tokenize
 
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class Reasoned(Generic[T]):
+    value: T
+    model_invocations: tuple[ModelInvocation, ...] = ()
+    warnings: tuple[str, ...] = ()
+
 
 class ResearchReasoner(Protocol):
-    async def plan(self, request: ResearchRequest) -> ResearchPlan: ...
+    async def plan(self, request: ResearchRequest) -> Reasoned[ResearchPlan]: ...
 
     async def extract_evidence(
         self, question: str, paper: Paper, passage: Passage
-    ) -> EvidenceCard | None: ...
+    ) -> Reasoned[EvidenceCard | None]: ...
 
     async def synthesize(
         self,
         question: str,
         papers: tuple[Paper, ...],
         evidence: tuple[EvidenceCard, ...],
-    ) -> tuple[ResearchReport, tuple[AtomicClaim, ...]]: ...
+    ) -> Reasoned[tuple[ResearchReport, tuple[AtomicClaim, ...]]]: ...
 
     async def verify(
         self,
         claim: AtomicClaim,
         evidence: tuple[EvidenceCard, ...],
         passages: tuple[Passage, ...],
-    ) -> VerificationResult: ...
+    ) -> Reasoned[VerificationResult]: ...
 
 
 class DeterministicReasoner:
     """A reproducible baseline. Replace it with a structured-output LLM adapter."""
 
-    async def plan(self, request: ResearchRequest) -> ResearchPlan:
+    async def plan(self, request: ResearchRequest) -> Reasoned[ResearchPlan]:
         deep_markers = ("compare", "contrast", "review", "比较", "综述", "路线", "现状")
         complexity = (
             Complexity.DEEP
@@ -72,39 +83,43 @@ class DeterministicReasoner:
             )
             for index, sub_question in enumerate(sub_questions)
         )
-        return ResearchPlan(
-            complexity=complexity,
-            objective=request.question,
-            sub_questions=tuple(sub_questions),
-            search_tasks=tasks,
-            inclusion_criteria=(
-                "Directly relevant to the research question",
-                "Traceable source metadata",
-            ),
-            exclusion_criteria=("Missing title", "No retrievable evidence text"),
+        return Reasoned(
+            ResearchPlan(
+                complexity=complexity,
+                objective=request.question,
+                sub_questions=tuple(sub_questions),
+                search_tasks=tasks,
+                inclusion_criteria=(
+                    "Directly relevant to the research question",
+                    "Traceable source metadata",
+                ),
+                exclusion_criteria=("Missing title", "No retrievable evidence text"),
+            )
         )
 
     async def extract_evidence(
         self, question: str, paper: Paper, passage: Passage
-    ) -> EvidenceCard | None:
+    ) -> Reasoned[EvidenceCard | None]:
         sentences = [
             part.strip() for part in re.split(r"(?<=[.!?。！？])\s*", passage.text) if part.strip()
         ]
         if not sentences:
-            return None
+            return Reasoned(None)
         best = max(sentences, key=lambda sentence: relevance(question, sentence))
         score = relevance(question, best)
         if score == 0:
             best = sentences[0]
             score = relevance(question, f"{paper.title} {best}")
-        return EvidenceCard(
-            paper_id=paper.paper_id,
-            passage_ids=(passage.passage_id,),
-            atomic_finding=best,
-            evidence_type=EvidenceType.DIRECT if score >= 0.1 else EvidenceType.BACKGROUND,
-            limitations=("Offline baseline extracts abstract-level evidence only.",),
-            source_quality="MEDIUM",
-            confidence=min(0.95, max(0.55, score + 0.5)),
+        return Reasoned(
+            EvidenceCard(
+                paper_id=paper.paper_id,
+                passage_ids=(passage.passage_id,),
+                atomic_finding=best,
+                evidence_type=EvidenceType.DIRECT if score >= 0.1 else EvidenceType.BACKGROUND,
+                limitations=("Offline baseline extracts abstract-level evidence only.",),
+                source_quality="MEDIUM",
+                confidence=min(0.95, max(0.55, score + 0.5)),
+            )
         )
 
     async def synthesize(
@@ -112,7 +127,7 @@ class DeterministicReasoner:
         question: str,
         papers: tuple[Paper, ...],
         evidence: tuple[EvidenceCard, ...],
-    ) -> tuple[ResearchReport, tuple[AtomicClaim, ...]]:
+    ) -> Reasoned[tuple[ResearchReport, tuple[AtomicClaim, ...]]]:
         paper_by_id = {paper.paper_id: paper for paper in papers}
         claims = tuple(
             AtomicClaim(
@@ -134,7 +149,7 @@ class DeterministicReasoner:
             body = "No traceable evidence was retrieved within the configured budget."
             summary = "Evidence is insufficient; the report requires human review."
         references = tuple(
-            _reference(index, paper_by_id[card.paper_id])
+            render_reference(index, paper_by_id[card.paper_id])
             for index, card in enumerate(evidence, start=1)
             if card.paper_id in paper_by_id
         )
@@ -144,16 +159,18 @@ class DeterministicReasoner:
             claim_ids=tuple(claim.claim_id for claim in claims),
         )
         title = f"Research brief: {question}"
-        markdown = _render_markdown(title, summary, section, references)
-        return (
-            ResearchReport(
-                title=title,
-                executive_summary=summary,
-                sections=(section,),
-                references=references,
-                markdown=markdown,
-            ),
-            claims,
+        markdown = render_markdown(title, summary, (section,), references)
+        return Reasoned(
+            (
+                ResearchReport(
+                    title=title,
+                    executive_summary=summary,
+                    sections=(section,),
+                    references=references,
+                    markdown=markdown,
+                ),
+                claims,
+            )
         )
 
     async def verify(
@@ -161,7 +178,7 @@ class DeterministicReasoner:
         claim: AtomicClaim,
         evidence: tuple[EvidenceCard, ...],
         passages: tuple[Passage, ...],
-    ) -> VerificationResult:
+    ) -> Reasoned[VerificationResult]:
         evidence_by_id = {card.evidence_id: card for card in evidence}
         passage_by_id = {passage.passage_id: passage for passage in passages}
         checked = tuple(
@@ -181,28 +198,34 @@ class DeterministicReasoner:
             status, confidence = VerificationStatus.PARTIAL, overlap
         else:
             status, confidence = VerificationStatus.UNSUPPORTED, 1 - overlap
-        return VerificationResult(
-            claim_id=claim.claim_id,
-            status=status,
-            confidence=min(1.0, confidence),
-            rationale=f"Lexical evidence coverage={overlap:.2f}; exact_match={exact}.",
-            checked_passage_ids=checked,
+        return Reasoned(
+            VerificationResult(
+                claim_id=claim.claim_id,
+                status=status,
+                confidence=min(1.0, confidence),
+                rationale=f"Lexical evidence coverage={overlap:.2f}; exact_match={exact}.",
+                checked_passage_ids=checked,
+            )
         )
 
 
-def _reference(index: int, paper: Paper) -> str:
+def render_reference(index: int, paper: Paper) -> str:
     authors = ", ".join(paper.authors) or "Unknown author"
     identifier = f"https://doi.org/{paper.doi}" if paper.doi else str(paper.url or "")
     return f"[{index}] {authors}. {paper.title}. {paper.year or 'n.d.'}. {identifier}".strip()
 
 
-def _render_markdown(
-    title: str, summary: str, section: ReportSection, references: tuple[str, ...]
+def render_markdown(
+    title: str,
+    summary: str,
+    sections: tuple[ReportSection, ...],
+    references: tuple[str, ...],
 ) -> str:
     references_text = "\n".join(references) or "No references available."
+    sections_text = "\n\n".join(f"## {section.heading}\n\n{section.body}" for section in sections)
     return (
         f"# {title}\n\n"
         f"## Executive summary\n\n{summary}\n\n"
-        f"## {section.heading}\n\n{section.body}\n\n"
+        f"{sections_text}\n\n"
         f"## References\n\n{references_text}\n"
     )

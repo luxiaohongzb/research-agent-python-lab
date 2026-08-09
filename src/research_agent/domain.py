@@ -176,6 +176,20 @@ class TraceEvent(FrozenModel):
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class ModelInvocation(FrozenModel):
+    invocation_id: str = Field(default_factory=lambda: f"model-{uuid4().hex[:12]}")
+    stage: str
+    provider: str
+    model: str
+    prompt_version: str
+    latency_ms: int = Field(ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    estimated_cost_usd: float | None = Field(default=None, ge=0)
+    success: bool
+    error_type: str | None = None
+
+
 class ResearchResult(FrozenModel):
     run_id: str
     status: RunStatus
@@ -189,6 +203,7 @@ class ResearchResult(FrozenModel):
     verifications: tuple[VerificationResult, ...]
     report: ResearchReport
     trace: tuple[TraceEvent, ...]
+    model_invocations: tuple[ModelInvocation, ...] = ()
     warnings: tuple[str, ...] = ()
 
 

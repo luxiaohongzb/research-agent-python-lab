@@ -11,6 +11,8 @@
 3. provider 失败隔离：远端源并行，一个失败不拖垮整个任务。
 4. 生成与核验分离：Verifier 只依据绑定 Passage，不依据模型常识。
 5. 评测分层：分别测引用精度、覆盖率、支持率和预算利用率。
+6. 结构化输出不是终点：Provider 保证 JSON schema，Java/Python 领域规则继续校验引用白名单、置信度和来源绑定。
+7. 可观测 fallback：单阶段模型失败不会丢掉整个 run，失败次数、错误类型、token、延迟和 prompt 版本会保留。
 
 ## 常见追问
 
@@ -20,7 +22,11 @@
 
 ### 当前 verifier 可靠吗？
 
-当前词法 verifier 是可复现基线，只证明数据链和质量门禁。下一步用结构化 entailment 模型增强，并保留确定性 citation ID 检查、人工抽审与 conflict/partial 标签。
+默认词法 verifier 是可复现基线，只证明数据链和质量门禁。OpenAI 模式会切换到结构化语义核验，同时保留确定性 citation ID 检查；进入生产后仍需增加人工抽审和 conflict/partial 专项数据集。
+
+### 为什么使用结构化输出后还要业务校验？
+
+JSON Schema 只能保证字段和类型正确，不能保证 evidence ID 真正存在，也不能保证 Claim 忠于输入。项目先用 Provider 原生 schema 约束形状，再由代码验证引用白名单和领域不变量；连续失败后只回退当前阶段。
 
 ### 如何进入生产？
 

@@ -15,11 +15,16 @@ class Settings(BaseSettings):
     )
 
     provider_mode: Literal["offline", "hybrid"] = "offline"
+    reasoner_mode: Literal["deterministic", "openai"] = "deterministic"
     openalex_email: str | None = None
     request_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
     default_max_papers: int = Field(default=8, ge=1, le=50)
     default_max_iterations: int = Field(default=2, ge=1, le=5)
     model: str = "gpt-5-mini"
+    model_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    model_max_retries: int = Field(default=3, ge=0, le=10)
+    model_input_cost_per_million_usd: float | None = Field(default=None, ge=0)
+    model_output_cost_per_million_usd: float | None = Field(default=None, ge=0)
 
 
 @lru_cache
