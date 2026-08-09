@@ -1,19 +1,45 @@
+x-runtime-environment: &runtime-environment
+  RESEARCH_AGENT_PROVIDER_MODE: ${RESEARCH_AGENT_PROVIDER_MODE:-offline}
+  RESEARCH_AGENT_INDEX_MODE: postgres
+  RESEARCH_AGENT_CHECKPOINT_MODE: postgres
+  RESEARCH_AGENT_RUN_STORE_MODE: postgres
+  RESEARCH_AGENT_EVENT_BROKER_MODE: redis
+  RESEARCH_AGENT_DISPATCH_MODE: redis
+  RESEARCH_AGENT_CANCELLATION_MODE: redis
+  RESEARCH_AGENT_ARTIFACT_STORE_MODE: s3
+  RESEARCH_AGENT_DATABASE_URL: postgresql://research:research@postgres:5432/research_agent
+  RESEARCH_AGENT_REDIS_URL: redis://redis:6379/0
+  RESEARCH_AGENT_S3_ENDPOINT_URL: http://minio:9000
+  RESEARCH_AGENT_S3_BUCKET: research-artifacts
+  RESEARCH_AGENT_S3_ACCESS_KEY_ID: minioadmin
+  RESEARCH_AGENT_S3_SECRET_ACCESS_KEY: minioadmin
+  RESEARCH_AGENT_GROBID_URL: http://grobid:8070
+  RESEARCH_AGENT_OTEL_ENABLED: ${RESEARCH_AGENT_OTEL_ENABLED:-false}
+
+x-runtime-dependencies: &runtime-dependencies
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  minio:
+    condition: service_healthy
+
 services:
   api:
     build: .
+    image: research-agent-python-lab:local
     ports:
       - "8000:8000"
-    environment:
-      RESEARCH_AGENT_PROVIDER_MODE: ${RESEARCH_AGENT_PROVIDER_MODE:-offline}
-      RESEARCH_AGENT_INDEX_MODE: postgres
-      RESEARCH_AGENT_CHECKPOINT_MODE: postgres
-      RESEARCH_AGENT_RUN_STORE_MODE: postgres
-      RESEARCH_AGENT_DATABASE_URL: postgresql://research:research@postgres:5432/research_agent
-      RESEARCH_AGENT_GROBID_URL: http://grobid:8070
-      RESEARCH_AGENT_OTEL_ENABLED: ${RESEARCH_AGENT_OTEL_ENABLED:-false}
-    depends_on:
-      postgres:
-        condition: service_healthy
+    environment: *runtime-environment
+    depends_on: *runtime-dependencies
+
+  worker:
+    image: research-agent-python-lab:local
+    command: ["research-agent-worker"]
+    expose:
+      - "9100"
+    environment: *runtime-environment
+    depends_on: *runtime-dependencies
 
   postgres:
     image: pgvector/pgvector:0.8.5-pg17
@@ -31,6 +57,36 @@ services:
       timeout: 5s
       retries: 12
 
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - research_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - research_minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   grobid:
     image: grobid/grobid:0.9.0-crf
     ports:
@@ -38,3 +94,5 @@ services:
 
 volumes:
   research_pgdata:
+  research_redis:
+  research_minio:

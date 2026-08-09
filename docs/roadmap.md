@@ -46,9 +46,26 @@
 
 额外交付：PostgreSQL 运行快照、SSE 有界事件回放、Windows Selector 事件循环启动器、真实 PostgreSQL checkpoint CI。当前取消、事件流和 Artifact Store 仍以单实例为边界。
 
-## Iteration 6：多租户与分布式执行
+## 已完成：Iteration 6 分布式执行
 
-- Redis/NATS 事件总线、Worker 队列、租约与跨副本协作取消
-- S3/MinIO Artifact Store、生命周期与引用计数清理
-- OIDC、RBAC、租户隔离、审计日志与审批 UI
-- Zotero API、只读 MCP 连接器和领域 embedding/reranker 评测
+- Redis Streams 事件日志与 consumer-group 任务队列
+- 独立 Worker 进程、闲置消息回收、执行租约与心跳续约
+- Redis 取消令牌与跨副本安全点协作取消
+- S3/MinIO Artifact Store、run-scoped 隔离和批量清理原语
+- API/Worker 分离 Compose 与真实 PostgreSQL、Redis、MinIO 集成测试
+
+系统采用至少一次投递，通过数据库幂等键、run 终态检查和 Redis 执行租约收敛重复消息；不会把分布式系统包装成严格 exactly-once。
+
+## Iteration 7：安全与产品化
+
+- OIDC、RBAC、租户隔离、审计日志与审批状态机
+- 租户级 token/费用/并发配额、API 限流与熔断
+- 人工审阅工作台 UI、运行列表、证据定位和运营看板
+- Artifact 生命周期定时任务、失败队列和管理员重放
+
+## Iteration 8：科研能力增强与最终交付
+
+- Zotero API 与只读 MCP 连接器
+- 科研领域 embedding/reranker 数据集、训练与离线评测
+- 论文关系图谱、研究项目记忆和增量综述
+- 压测、故障演练、部署手册和完整面试材料

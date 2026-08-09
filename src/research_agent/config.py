@@ -19,11 +19,26 @@ class Settings(BaseSettings):
     index_mode: Literal["memory", "postgres"] = "memory"
     checkpoint_mode: Literal["memory", "postgres"] = "memory"
     run_store_mode: Literal["memory", "postgres"] = "memory"
+    event_broker_mode: Literal["memory", "redis"] = "memory"
+    dispatch_mode: Literal["local", "redis"] = "local"
+    cancellation_mode: Literal["memory", "redis"] = "memory"
+    artifact_store_mode: Literal["memory", "s3"] = "memory"
     reranker_mode: Literal["lexical", "cross_encoder"] = "lexical"
     openalex_email: str | None = None
     semantic_scholar_enabled: bool = False
     semantic_scholar_api_key: str | None = None
     database_url: str = "postgresql://research:research@127.0.0.1:5432/research_agent"
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    redis_prefix: str = "research-agent"
+    redis_consumer_group: str = "research-workers"
+    queue_lease_seconds: int = Field(default=60, ge=5, le=3_600)
+    worker_metrics_port: int = Field(default=9_100, ge=1_024, le=65_535)
+    s3_endpoint_url: str | None = None
+    s3_bucket: str = "research-artifacts"
+    s3_region: str = "us-east-1"
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: str | None = None
+    s3_prefix: str = "artifacts"
     grobid_url: str = "http://127.0.0.1:8070"
     grobid_timeout_seconds: float = Field(default=120.0, gt=0, le=300)
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"

@@ -49,6 +49,8 @@ flowchart TD
 - `artifacts.py`：并行 Worker 的 run-scoped 大对象交接，图状态只保存引用。
 - `run_store.py`：运行快照持久化和数据库级幂等约束。
 - `events.py`：SSE 事件的有界回放与实时 fan-out。
+- `distributed.py`：Redis Streams 任务队列、取消令牌与执行租约。
+- `worker.py`：consumer-group Worker、消息确认和租约心跳。
 - `observability.py`：Prometheus 运行指标、质量摘要和可选 OTLP trace。
 - `citations.py`：从规范化 Paper 生成 BibTeX 和 CSL JSON。
 - `evaluation.py`：独立于运行链路的质量指标。
@@ -83,7 +85,12 @@ LangGraph 管理 checkpoint 表；`RUN_STORE_MODE=postgres` 则把任务状态�
 幂等键保存为应用自己的 JSONB 快照。两者职责不同：checkpoint 用于恢复图执行，run
 store 用于稳定的 HTTP 查询契约。
 
-下一步生产演进：
+分布式模式下，Worker 的 `RetrievalBatch` 进入 S3/MinIO，checkpoint 只保存
+`ArtifactRef`。对象 key 同时包含 run ID 和 artifact ID，读取时再次校验 run ID，避免
+跨运行越权。Store 已提供分页统计和按 run 批量删除原语；自动生命周期调度留到
+Iteration 7。
+
+下一步存储演进：
 
 - 论文全文和解析文件进入对象存储；
 - Passage、EvidenceCard 和 Claim 进入 Artifact Store；
@@ -91,14 +98,19 @@ store 用于稳定的 HTTP 查询契约。
 
 ### 运行控制与事件
 
-`Idempotency-Key` 在 PostgreSQL 中有唯一约束，重复提交返回原 run；取消会停止当前实例
-持有的 asyncio task，并保留最近 checkpoint；恢复用相同 `thread_id/run_id` 从 checkpoint
-继续。工作流的节点更新被转换为带单调 sequence 的 SSE 事件，客户端可通过
-`after_sequence` 重放断线期间的有界历史。
+`Idempotency-Key` 在 PostgreSQL 中有唯一约束，重复提交返回原 run。分布式模式下，API
+只写入 Redis Stream，独立 Worker 使用 consumer group 消费。Worker 获得 run 级 Redis
+租约后才执行，并以租期三分之一为周期续约；进程崩溃后，其他 Worker 使用
+`XAUTOCLAIM` 回收超过租期的 pending 消息。终态 run 会直接确认重复消息。
 
-当前事件 broker、task 注册表和 Artifact Store 都是进程内实现。这意味着单实例和进程
-重启恢复已经可演示，但跨副本取消和事件订阅尚不成立；多副本版本需要共享事件总线、
-持久化 Artifact、Worker 租约及协作式取消标记。
+取消接口立即写 PostgreSQL `CANCELLED` 快照和 Redis 取消令牌。远端 Worker 在 LangGraph
+节点进度安全点读取令牌，不再依赖 API 进程持有 asyncio task；恢复会清除令牌，并使用
+相同 `thread_id/run_id` 继续 checkpoint。节点更新进入按 run 隔离的 Redis Stream，事件
+sequence 使用 Redis 原子递增，SSE 可通过 `after_sequence` 跨 API 副本重放。
+
+该链路是至少一次投递，不是 exactly-once。数据库幂等键、consumer group、run 终态检查
+和执行租约共同使重复投递收敛；若要处理外部不可逆工具，还必须使用 outbox/inbox 或工具
+自身的幂等键。
 
 ### 为什么使用 RRF
 

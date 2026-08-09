@@ -34,6 +34,10 @@ observability = [
   "opentelemetry-exporter-otlp-proto-grpc>=1.39,<2",
   "opentelemetry-sdk>=1.39,<2",
 ]
+distributed = [
+  "boto3>=1.40,<2",
+  "redis>=6.4,<8",
+]
 ml = ["sentence-transformers>=5.1,<6"]
 dev = [
   "mypy>=1.17,<2",
@@ -46,6 +50,7 @@ dev = [
 research-agent = "research_agent.cli:main"
 research-agent-eval = "research_agent.eval_cli:main"
 research-agent-server = "research_agent.server:main"
+research-agent-worker = "research_agent.worker:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/research_agent"]

@@ -20,6 +20,8 @@
 12. 运行快照和 checkpoint 分层：前者服务 HTTP 查询与幂等，后者服务 LangGraph 断点恢复。
 13. SSE 使用 sequence 支持断线重放；Prometheus 看运行趋势，Trace 看单次调用路径。
 14. 人工审阅绑定具体 Claim/Evidence ID，BibTeX/CSL 导出复用规范化文献模型。
+15. API 和执行 Worker 分离：Redis Streams 至少一次投递，终态检查与 run 租约抑制重复执行。
+16. checkpoint、run snapshot、event stream 和 S3 Artifact 各自承担不同恢复语义，不混成一个“状态库”。
 
 ## 常见追问
 
@@ -41,6 +43,8 @@ JSON Schema 只能保证字段和类型正确，不能保证 evidence ID 真正�
 
 ### 如何进入生产？
 
-单实例生产工作台已经具备 PostgreSQL checkpoint/运行快照、幂等、取消恢复、SSE、
-Prometheus、OpenTelemetry 接入点和人工审阅记录。多副本部署前还需把事件、Artifact 和
-取消信号迁移到共享基础设施，并增加 OIDC/RBAC、租户隔离、限流、熔断和审批 UI。
+分布式运行链路已经具备 PostgreSQL checkpoint/运行快照、Redis Streams 队列与事件、
+独立 Worker、执行租约、协作取消、MinIO Artifact、Prometheus 和 OpenTelemetry 接入点。
+下一步重点不再是“加一个队列”，而是 OIDC/RBAC、多租户隔离、配额限流、失败队列、
+Artifact 生命周期任务和审批 UI。系统明确采用至少一次投递；不可逆工具还需要 outbox
+或下游幂等键，不能把 Redis 租约描述成 exactly-once。

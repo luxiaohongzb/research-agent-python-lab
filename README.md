@@ -35,6 +35,8 @@ Synthesize → Atomic Claims → Verify → Quality Gate
 - PostgreSQL 运行快照与 LangGraph checkpoint，支持幂等提交、取消和断点恢复
 - 原生 SSE 进度流、Claim/Evidence 人工审阅记录、BibTeX/CSL JSON 导出
 - Prometheus 指标、运行质量摘要，以及可选 OpenTelemetry OTLP trace
+- Redis Streams 任务队列与事件日志、独立 Worker、执行租约和跨副本协作取消
+- AWS S3/MinIO Artifact Store，支持 run-scoped 隔离、分页统计与批量清理
 - 24 条中英双语 golden cases，以及引用精度、覆盖率、支持率 CI 门禁
 
 ## 技术栈
@@ -105,11 +107,15 @@ RESEARCH_AGENT_SEMANTIC_SCHOLAR_API_KEY=...  # 可选，但正式使用建议配
 
 ## 全文与混合检索
 
-一条命令启动 API、PostgreSQL/pgvector 和 GROBID：
+一条命令启动 API、独立 Worker、PostgreSQL/pgvector、Redis、MinIO 和 GROBID：
 
 ```bash
 docker compose up --build
 ```
+
+异步请求由 API 写入 Redis Stream，`research-agent-worker` 通过 consumer group 消费；
+API 与 Worker 不共享进程内状态。分布式设计和故障恢复语义见
+[分布式运行指南](docs/distributed-runtime.md)。
 
 也可以只启动 PostgreSQL，在宿主机运行 API：
 
@@ -170,6 +176,7 @@ src/research_agent/
 ├── citations.py           BibTeX 与 CSL JSON 导出
 ├── config.py              环境配置
 ├── domain.py              科研领域契约
+├── distributed.py         Redis 队列、取消令牌与执行租约
 ├── events.py              有界回放和实时 SSE 事件 broker
 ├── eval_cli.py            Golden dataset 质量门禁
 ├── evaluation.py          分层评测指标
@@ -184,10 +191,11 @@ src/research_agent/
 ├── run_store.py           内存/PostgreSQL 运行快照
 ├── semantic_scholar.py     元数据与引用邻域 adapter
 ├── server.py              跨平台 API 启动入口
+├── worker.py              独立分布式 Worker 入口
 └── workflow.py            LangGraph 状态图和质量门禁
 ```
 
-详细设计见 [架构说明](docs/architecture.md)，运行与恢复见 [生产工作台指南](docs/production-workbench.md)，多 Agent 实践见 [Supervisor 指南](docs/multi-agent.md)，混合检索实践见 [全文检索指南](docs/hybrid-retrieval.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
+详细设计见 [架构说明](docs/architecture.md)，运行与恢复见 [生产工作台指南](docs/production-workbench.md)，队列与 Worker 见 [分布式运行指南](docs/distributed-runtime.md)，多 Agent 实践见 [Supervisor 指南](docs/multi-agent.md)，混合检索实践见 [全文检索指南](docs/hybrid-retrieval.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
 
 ## 设计原则
 
@@ -199,4 +207,4 @@ src/research_agent/
 
 ## 当前边界
 
-这是 Iteration 5：全文混合检索、自适应多 Agent 和生产工作台后端已形成可运行链路。运行快照与 checkpoint 可持久化到 PostgreSQL；事件 broker 和 Artifact Store 仍是单进程有界内存实现，因此多副本部署前还需要 Redis/NATS 事件总线、持久化对象存储和分布式取消租约。hash embedding 与词法 reranker 是确定性工程基线，不代表 SOTA 语义效果；领域 embedding、鉴权/RBAC 和人工审批 UI 位于后续路线。离线语料与 golden cases 用于验证架构和回归，不代表真实科学结论。
+这是 Iteration 6：异步运行已从 API 进程拆到 Redis Streams consumer-group Worker，事件、取消信号和执行租约可跨副本共享，Artifact 可持久化到 S3/MinIO。当前仍缺少 OIDC/RBAC、多租户配额、审批 UI 和自动 Artifact 生命周期任务；Redis Streams 提供至少一次投递，系统依靠幂等 run、执行租约与终态检查收敛，不声称严格 exactly-once。hash embedding 与词法 reranker 是确定性工程基线，不代表 SOTA 语义效果；离线语料与 golden cases 用于验证架构和回归，不代表真实科学结论。

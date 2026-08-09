@@ -87,6 +87,12 @@ class RuntimeObservability:
         ACTIVE_RUNS.dec()
         RUNS.labels(status=status).inc()
 
+    async def interrupted(self) -> None:
+        """Release the active gauge when a worker loses ownership without a terminal state."""
+        async with self._lock:
+            self._active = max(0, self._active - 1)
+        ACTIVE_RUNS.dec()
+
     async def summary(self) -> RuntimeSummary:
         async with self._lock:
             return RuntimeSummary(

@@ -1,8 +1,8 @@
 # 生产工作台指南
 
-Iteration 5 的目标不是把后台任务包装成几个接口，而是让一次研究运行具备稳定身份、
-可恢复状态、实时进度、人工复核和可观测性。默认内存模式适合学习和面试演示；
-PostgreSQL 模式用于验证接近生产的持久化边界。
+Iteration 5 让研究运行具备稳定身份、可恢复状态、实时进度、人工复核和可观测性；
+Iteration 6 再把执行从 API 进程拆到独立 Worker。默认内存模式适合学习和单元测试，
+Compose 模式验证 PostgreSQL、Redis 和 MinIO 组成的分布式运行边界。
 
 ## 运行模型
 
@@ -11,20 +11,28 @@ sequenceDiagram
     participant C as Client
     participant A as FastAPI
     participant R as Run Store
+    participant Q as Redis Streams
+    participant W as Worker
     participant G as LangGraph
     participant P as Checkpoint Store
+    participant S as MinIO
     C->>A: POST /runs + Idempotency-Key
     A->>R: create snapshot (unique key)
+    A->>Q: enqueue run_id
     A-->>C: 202 PENDING + run_id
-    A->>G: execute with thread_id=run_id
+    W->>Q: XREADGROUP + acquire lease
+    W->>G: execute with thread_id=run_id
     G->>P: persist node checkpoints
-    G-->>A: node progress
+    G->>S: put run-scoped Artifact
+    G-->>Q: node progress
+    A->>Q: XREAD after sequence
     A-->>C: SSE sequence + event
-    A->>R: save result or failure
+    W->>R: save result or failure
+    W->>Q: XACK + release lease
     C->>A: DELETE /runs/{id}
-    A->>G: cancel local task
+    A->>Q: set cancellation token
     C->>A: POST /runs/{id}/resume
-    A->>G: resume same thread_id
+    A->>Q: clear token + enqueue resume
 ```
 
 运行快照和 checkpoint 不能合并为一个概念：快照是面向 API 的聚合，包含请求、状态、
@@ -40,26 +48,30 @@ python -m pip install -e ".[dev]"
 research-agent-server --reload
 ```
 
-完整 PostgreSQL 模式：
+完整分布式模式：
 
 ```bash
-docker compose up -d postgres
-python -m pip install -e ".[dev,postgres,observability]"
+docker compose up --build
 ```
 
-PowerShell：
+宿主机分别运行 API 与 Worker 时安装全部适配器：
 
 ```powershell
+python -m pip install -e ".[dev,postgres,observability,distributed]"
 $env:RESEARCH_AGENT_INDEX_MODE="postgres"
 $env:RESEARCH_AGENT_CHECKPOINT_MODE="postgres"
 $env:RESEARCH_AGENT_RUN_STORE_MODE="postgres"
+$env:RESEARCH_AGENT_EVENT_BROKER_MODE="redis"
+$env:RESEARCH_AGENT_DISPATCH_MODE="redis"
+$env:RESEARCH_AGENT_CANCELLATION_MODE="redis"
+$env:RESEARCH_AGENT_ARTIFACT_STORE_MODE="s3"
 $env:RESEARCH_AGENT_DATABASE_URL="postgresql://research:research@127.0.0.1:5432/research_agent"
 research-agent-server
+research-agent-worker
 ```
 
-macOS/Linux 使用同名 `export`。也可以直接 `docker compose up --build` 启动 API、
-PostgreSQL/pgvector 和 GROBID。Windows 原生运行 PostgreSQL checkpoint 时必须使用项目
-启动器，以便 psycopg 使用 Selector event loop。
+macOS/Linux 使用同名 `export`。Windows 原生运行 PostgreSQL checkpoint 时，API 和 Worker
+入口都会选择 psycopg 支持的 Selector event loop。
 
 ## API 演示
 
@@ -104,17 +116,20 @@ GET /metrics/
 
 设置 `RESEARCH_AGENT_OTEL_ENABLED=true` 并配置标准 OTLP 环境变量后，运行会产生
 `research.run` span。Prometheus 指标包括运行状态、活跃任务、耗时、估算费用和 Worker
-状态；`/v1/metrics/summary` 是便于前端演示的进程内聚合，不替代长期时序数据库。
+状态；`/v1/metrics/summary` 是便于前端演示的 API 进程聚合，不替代长期时序数据库。
+分布式 Worker 在容器内 `9100` 暴露自己的 Prometheus 指标，生产 Prometheus 应同时抓取
+API `/metrics/` 和每个 Worker `:9100/metrics`。
 
 ## 一致性与边界
 
 - PostgreSQL 唯一索引保证幂等，不依赖进程锁。
-- 取消是单实例 task cancellation；checkpoint 让同一 run 可以继续。
-- SSE 历史有容量上限，慢消费者队列满时淘汰最旧事件，防止内存无界增长。
-- 事件、活跃 task 和 Artifact 仍是进程内状态，当前不应水平扩容。
+- Redis consumer group 是至少一次投递；终态检查和执行租约让重复消息收敛。
+- 取消令牌跨进程共享，但只在 LangGraph 节点边界生效，不会粗暴终止正在写外部系统的调用。
+- SSE 历史通过 Redis Stream `MAXLEN` 有界保留，sequence 使用原子递增。
+- Artifact 使用 S3 JSON schema，不使用不安全的 pickle；run ID 同时进入 key 和读取校验。
 - OpenTelemetry 默认关闭，避免本地测试隐式访问外部 collector。
 - 审阅记录目前是领域审计数据，不包含身份认证或审批状态机。
 
-多副本演进应引入共享事件总线、持久化 Artifact Store、带租约的 Worker 队列和数据库
-取消令牌，再加 OIDC/RBAC 与租户级资源配额。这个边界在面试中要主动说明：当前实现验证
-了恢复和运维契约，但没有把单实例能力包装成“分布式完成”。
+下一阶段仍需 OIDC/RBAC、租户级资源配额、失败队列、自动 Artifact 生命周期任务和审批
+状态机。对于付款、发信等不可逆工具，仍需 outbox/inbox 或下游幂等键；Redis 租约本身
+不能提供严格 exactly-once。

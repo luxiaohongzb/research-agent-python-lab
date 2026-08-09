@@ -6,6 +6,12 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from research_agent.distributed import (
+    CancellationRegistry,
+    InMemoryCancellationRegistry,
+    RunCancellationRequested,
+    RunQueue,
+)
 from research_agent.domain import (
     HumanReview,
     HumanReviewRequest,
@@ -15,7 +21,7 @@ from research_agent.domain import (
     RunSnapshot,
     RunStatus,
 )
-from research_agent.events import InMemoryRunEventBroker
+from research_agent.events import InMemoryRunEventBroker, RunEventBroker
 from research_agent.observability import RuntimeObservability, RuntimeSummary
 from research_agent.run_store import (
     IdempotencyConflictError,
@@ -48,12 +54,16 @@ class ResearchApplicationService:
         workflow: ResearchWorkflow,
         store: RunStore | None = None,
         *,
-        events: InMemoryRunEventBroker | None = None,
+        events: RunEventBroker | None = None,
+        queue: RunQueue | None = None,
+        cancellations: CancellationRegistry | None = None,
         observability: RuntimeObservability | None = None,
     ) -> None:
         self._workflow = workflow
         self._store = store or InMemoryRunStore()
         self._events = events or InMemoryRunEventBroker()
+        self._queue = queue
+        self._cancellations = cancellations or InMemoryCancellationRegistry()
         self._observability = observability or RuntimeObservability()
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -71,6 +81,9 @@ class ResearchApplicationService:
         await self._observability.finished(result)
         return result
 
+    async def initialize(self) -> None:
+        await self._workflow.initialize()
+
     async def submit(
         self,
         request: ResearchRequest,
@@ -86,11 +99,11 @@ class ResearchApplicationService:
         )
         snapshot = await self._store.create(candidate)
         if snapshot.run_id != run_id:
+            if self._queue is not None and snapshot.status is RunStatus.PENDING:
+                await self._queue.enqueue(snapshot.run_id)
             return snapshot
         await self._events.publish(run_id, "queued", {"status": snapshot.status.value})
-        task = asyncio.create_task(self._execute(snapshot), name=f"research-run-{run_id}")
-        self._tasks[run_id] = task
-        task.add_done_callback(lambda _: self._tasks.pop(run_id, None))
+        await self._dispatch(snapshot)
         return snapshot
 
     async def get(self, run_id: str) -> RunSnapshot:
@@ -100,6 +113,7 @@ class ResearchApplicationService:
         snapshot = await self._store.get(run_id)
         if snapshot.status in TERMINAL_STATUSES:
             return snapshot
+        await self._cancellations.request(run_id)
         task = self._tasks.get(run_id)
         if task is not None:
             task.cancel()
@@ -109,12 +123,7 @@ class ResearchApplicationService:
             if latest.status is RunStatus.CANCELLED:
                 return latest
             snapshot = latest
-        cancelled = snapshot.model_copy(
-            update={"status": RunStatus.CANCELLED, "updated_at": datetime.now(UTC)}
-        )
-        await self._store.save(cancelled)
-        await self._events.publish(run_id, "cancelled", {"status": RunStatus.CANCELLED.value})
-        return cancelled
+        return await self._mark_cancelled(snapshot)
 
     async def resume(self, run_id: str) -> RunSnapshot:
         snapshot = await self._store.get(run_id)
@@ -130,14 +139,10 @@ class ResearchApplicationService:
                 "updated_at": datetime.now(UTC),
             }
         )
+        await self._cancellations.clear(run_id)
         await self._store.save(pending)
         await self._events.publish(run_id, "resuming", {"status": RunStatus.PENDING.value})
-        task = asyncio.create_task(
-            self._execute(pending, resume=True),
-            name=f"research-resume-{run_id}",
-        )
-        self._tasks[run_id] = task
-        task.add_done_callback(lambda _: self._tasks.pop(run_id, None))
+        await self._dispatch(pending, resume=True)
         return pending
 
     async def review(self, run_id: str, request: HumanReviewRequest) -> RunSnapshot:
@@ -173,7 +178,16 @@ class ResearchApplicationService:
     async def stream_events(
         self, run_id: str, *, after_sequence: int = 0
     ) -> AsyncIterator[RunEvent]:
-        await self._store.get(run_id)
+        snapshot = await self._store.get(run_id)
+        history = await self._events.history(run_id)
+        if not history and snapshot.status in TERMINAL_STATUSES:
+            yield RunEvent(
+                sequence=1,
+                run_id=run_id,
+                event=snapshot.status.value.lower(),
+                details={"status": snapshot.status.value, "recovered_from_snapshot": True},
+            )
+            return
         async for event in self._events.stream(run_id, after_sequence=after_sequence):
             yield event
 
@@ -190,10 +204,47 @@ class ResearchApplicationService:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self._events.close()
+        if self._queue is not None:
+            await self._queue.close()
+        await self._cancellations.close()
         await self._store.close()
         await self._workflow.close()
 
-    async def _execute(self, snapshot: RunSnapshot, *, resume: bool = False) -> None:
+    async def execute_queued(self, run_id: str, *, resume: bool = False) -> None:
+        snapshot = await self._store.get(run_id)
+        if snapshot.status in {RunStatus.COMPLETED, RunStatus.NEEDS_REVIEW}:
+            return
+        if snapshot.status is RunStatus.CANCELLED and not resume:
+            return
+        should_resume = resume or snapshot.status in {RunStatus.RUNNING, RunStatus.FAILED}
+        await self._execute(
+            snapshot,
+            resume=should_resume,
+            persist_task_cancellation=False,
+        )
+
+    async def _dispatch(self, snapshot: RunSnapshot, *, resume: bool = False) -> None:
+        if self._queue is not None:
+            await self._queue.enqueue(snapshot.run_id, resume=resume)
+            return
+        task = asyncio.create_task(
+            self._execute(snapshot, resume=resume),
+            name=f"research-run-{snapshot.run_id}",
+        )
+        self._tasks[snapshot.run_id] = task
+        task.add_done_callback(lambda _: self._tasks.pop(snapshot.run_id, None))
+
+    async def _execute(
+        self,
+        snapshot: RunSnapshot,
+        *,
+        resume: bool = False,
+        persist_task_cancellation: bool = True,
+    ) -> None:
+        if await self._cancellations.is_requested(snapshot.run_id):
+            await self._mark_cancelled(snapshot)
+            return
         running = snapshot.model_copy(
             update={"status": RunStatus.RUNNING, "updated_at": datetime.now(UTC)}
         )
@@ -202,6 +253,8 @@ class ResearchApplicationService:
         await self._observability.started()
 
         async def progress(node: str, details: dict[str, object]) -> None:
+            if await self._cancellations.is_requested(snapshot.run_id):
+                raise RunCancellationRequested(snapshot.run_id)
             await self._events.publish(
                 snapshot.run_id,
                 "progress",
@@ -225,6 +278,8 @@ class ResearchApplicationService:
                         run_id=snapshot.run_id,
                         progress=progress,
                     )
+            if await self._cancellations.is_requested(snapshot.run_id):
+                raise RunCancellationRequested(snapshot.run_id)
             final = running.model_copy(
                 update={
                     "status": result.status,
@@ -239,22 +294,21 @@ class ResearchApplicationService:
                 "completed",
                 {"status": result.status.value},
             )
-        except asyncio.CancelledError:
-            cancelled = running.model_copy(
-                update={
-                    "status": RunStatus.CANCELLED,
-                    "updated_at": datetime.now(UTC),
-                }
-            )
-            await self._store.save(cancelled)
+        except RunCancellationRequested:
+            await self._mark_cancelled(running)
             await self._observability.failed(RunStatus.CANCELLED.value)
-            await self._events.publish(
-                snapshot.run_id,
-                "cancelled",
-                {"status": RunStatus.CANCELLED.value},
-            )
+        except asyncio.CancelledError:
+            if persist_task_cancellation:
+                await self._mark_cancelled(running)
+                await self._observability.failed(RunStatus.CANCELLED.value)
+            else:
+                await self._observability.interrupted()
             raise
         except Exception as exc:  # failure is persisted for asynchronous callers
+            if await self._cancellations.is_requested(snapshot.run_id):
+                await self._mark_cancelled(running)
+                await self._observability.failed(RunStatus.CANCELLED.value)
+                return
             failed = running.model_copy(
                 update={
                     "status": RunStatus.FAILED,
@@ -269,3 +323,21 @@ class ResearchApplicationService:
                 "failed",
                 {"status": RunStatus.FAILED.value, "error_type": type(exc).__name__},
             )
+
+    async def _mark_cancelled(self, snapshot: RunSnapshot) -> RunSnapshot:
+        latest = await self._store.get(snapshot.run_id)
+        if latest.status is RunStatus.CANCELLED:
+            return latest
+        cancelled = latest.model_copy(
+            update={
+                "status": RunStatus.CANCELLED,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        await self._store.save(cancelled)
+        await self._events.publish(
+            snapshot.run_id,
+            "cancelled",
+            {"status": RunStatus.CANCELLED.value},
+        )
+        return cancelled

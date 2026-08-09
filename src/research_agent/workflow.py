@@ -12,7 +12,12 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
-from research_agent.artifacts import ArtifactNotFoundError, InMemoryArtifactStore
+from research_agent.artifacts import (
+    ArtifactNotFoundError,
+    ArtifactStore,
+    InMemoryArtifactStore,
+    S3ArtifactStore,
+)
 from research_agent.config import Settings, get_settings
 from research_agent.domain import (
     ArtifactKind,
@@ -94,7 +99,7 @@ class ResearchWorkflow:
         provider: CompositePaperProvider | None = None,
         retriever: ResearchRetriever | None = None,
         reasoner: ResearchReasoner | None = None,
-        artifact_store: InMemoryArtifactStore | None = None,
+        artifact_store: ArtifactStore | None = None,
         worker_timeout_seconds: float = 45.0,
         checkpoint_dsn: str | None = None,
     ) -> None:
@@ -744,6 +749,18 @@ def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow
         reranker = SentenceTransformerReranker(current.cross_encoder_model)
     else:
         reranker = DiversityReranker()
+    artifact_store: ArtifactStore
+    if current.artifact_store_mode == "s3":
+        artifact_store = S3ArtifactStore(
+            bucket=current.s3_bucket,
+            endpoint_url=current.s3_endpoint_url,
+            region=current.s3_region,
+            access_key_id=current.s3_access_key_id,
+            secret_access_key=current.s3_secret_access_key,
+            prefix=current.s3_prefix,
+        )
+    else:
+        artifact_store = InMemoryArtifactStore()
     reasoner: ResearchReasoner = DeterministicReasoner()
     if current.reasoner_mode == "openai":
         try:
@@ -781,6 +798,7 @@ def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow
             reranker=reranker,
         ),
         reasoner=reasoner,
+        artifact_store=artifact_store,
         worker_timeout_seconds=current.worker_timeout_seconds,
         checkpoint_dsn=(current.database_url if current.checkpoint_mode == "postgres" else None),
     )

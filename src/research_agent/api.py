@@ -19,13 +19,19 @@ from research_agent.application import (
 )
 from research_agent.citations import render_bibtex, render_csl_json
 from research_agent.config import get_settings
+from research_agent.distributed import (
+    CancellationRegistry,
+    RedisCancellationRegistry,
+    RedisRunQueue,
+    RunQueue,
+)
 from research_agent.domain import (
     HumanReviewRequest,
     ResearchRequest,
     ResearchResult,
     RunSnapshot,
 )
-from research_agent.events import InMemoryRunEventBroker
+from research_agent.events import InMemoryRunEventBroker, RedisRunEventBroker, RunEventBroker
 from research_agent.ingestion import GrobidClient, GrobidError, TeiParser
 from research_agent.observability import RuntimeObservability, RuntimeSummary
 from research_agent.run_store import PostgresRunStore, RunStore
@@ -48,7 +54,9 @@ def create_app(
     grobid_client: GrobidClient | None = None,
     tei_parser: TeiParser | None = None,
     run_store: RunStore | None = None,
-    event_broker: InMemoryRunEventBroker | None = None,
+    event_broker: RunEventBroker | None = None,
+    run_queue: RunQueue | None = None,
+    cancellations: CancellationRegistry | None = None,
     observability: RuntimeObservability | None = None,
 ) -> FastAPI:
     settings = get_settings()
@@ -56,6 +64,32 @@ def create_app(
     active_store = run_store
     if active_store is None and settings.run_store_mode == "postgres":
         active_store = PostgresRunStore(settings.database_url)
+    active_events = event_broker
+    if active_events is None:
+        if settings.event_broker_mode == "redis":
+            active_events = RedisRunEventBroker(
+                settings.redis_url,
+                prefix=settings.redis_prefix,
+            )
+        else:
+            active_events = InMemoryRunEventBroker()
+    active_queue = run_queue
+    if active_queue is None and settings.dispatch_mode == "redis":
+        active_queue = RedisRunQueue(
+            settings.redis_url,
+            consumer_name="api-dispatcher",
+            group=settings.redis_consumer_group,
+            prefix=settings.redis_prefix,
+            lease_seconds=settings.queue_lease_seconds,
+        )
+    active_cancellations = cancellations
+    if active_cancellations is None and (
+        settings.cancellation_mode == "redis" or settings.dispatch_mode == "redis"
+    ):
+        active_cancellations = RedisCancellationRegistry(
+            settings.redis_url,
+            prefix=settings.redis_prefix,
+        )
     runtime_observability = observability or RuntimeObservability(
         otel_enabled=settings.otel_enabled,
         service_name=settings.otel_service_name,
@@ -63,13 +97,15 @@ def create_app(
     service = ResearchApplicationService(
         active_workflow,
         active_store,
-        events=event_broker,
+        events=active_events,
+        queue=active_queue,
+        cancellations=active_cancellations,
         observability=runtime_observability,
     )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        await active_workflow.initialize()
+        await service.initialize()
         try:
             yield
         finally:
