@@ -11,4 +11,3 @@ RUN python -m pip install --upgrade pip && python -m pip install .
 
 EXPOSE 8000
 CMD ["uvicorn", "research_agent.api:app", "--host", "0.0.0.0", "--port", "8000"]
-

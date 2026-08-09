@@ -101,4 +101,3 @@ src/research_agent/
 ## 当前边界
 
 这是 MVP-1：全文 PDF 解析、pgvector、引用图、多 Worker fan-out、持久化 checkpoint 和人工审批 UI 位于后续路线。当前离线 reasoner 用于验证架构，不代表真实科学结论。
-

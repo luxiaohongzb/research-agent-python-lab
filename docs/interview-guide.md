@@ -25,4 +25,3 @@
 ### 如何进入生产？
 
 将内存 checkpoint 换 PostgreSQL，全文解析交给 GROBID，检索升级为 BM25 + pgvector + citation graph + reranker，并加入幂等、限流、熔断、OpenTelemetry 和人工审批。
-

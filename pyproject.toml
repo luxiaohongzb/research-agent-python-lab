@@ -50,4 +50,3 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 python_version = "3.11"
 strict = true
 packages = ["research_agent"]
-

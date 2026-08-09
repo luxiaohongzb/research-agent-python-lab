@@ -37,4 +37,3 @@
 - SSE 进度、证据审阅、争议 Claim 与人工审批
 - OpenTelemetry、Prometheus、成本和质量看板
 - Zotero、BibTeX、CSL 和只读 MCP 连接器
-
