@@ -79,6 +79,7 @@ export interface RunEvent {
   event: string;
   details?: Record<string, unknown>;
   sequence?: number;
+  occurred_at?: string;
 }
 
 export interface IngestionResult {
