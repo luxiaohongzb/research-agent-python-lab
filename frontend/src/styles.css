@@ -301,6 +301,14 @@ a { color: inherit; text-decoration: none; }
 .admin-row code { font: 8px "SFMono-Regular",Consolas,monospace; }
 .deadletter-table .admin-row { grid-template-columns: .8fr .8fr 2fr; }
 .success-empty { color: var(--green); }
+.user-admin-table .admin-row > div:first-child > span:last-child { display: grid; }
+.user-admin-table .admin-row small { margin-top: 3px; color: var(--muted); font-size: 8px; }
+.role-pills { display: flex!important; flex-wrap: wrap; gap: 4px!important; }
+.role-pills button { height: 25px; padding: 0 7px; color: var(--muted); background: #ebe8df; border: 1px solid transparent; font-size: 7px; font-weight: 700; letter-spacing: .06em; }
+.role-pills button.active { color: var(--green); background: var(--green-light); border-color: #b9d1ca; }
+.account-state { justify-self: start; min-width: 58px; height: 27px; border: 0; font-size: 8px; font-weight: 700; }
+.account-state.active { color: var(--green); background: var(--green-light); }
+.account-state.disabled { color: #a94c2b; background: var(--coral-soft); }
 
 /* Modal + toast */
 .modal-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px; background: rgba(11,31,28,.62); backdrop-filter: blur(5px); }
@@ -310,9 +318,23 @@ a { color: inherit; text-decoration: none; }
 .modal h2 { margin: 0; font: 600 27px var(--serif); }
 .modal-description { margin: 12px 0 22px; color: var(--muted); font-size: 11px; line-height: 1.75; }
 .modal label { display: block; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.modal form label:not(:first-child) { margin-top: 14px; }
 .modal input { width: 100%; height: 46px; margin-top: 7px; padding: 0 12px; background: white; border: 1px solid var(--line); outline: 0; }
 .modal input:focus { border-color: var(--green); }
+.modal select { width: 100%; height: 46px; margin-top: 7px; padding: 0 12px; background: white; border: 1px solid var(--line); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.auth-method-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; margin: 17px 0 22px; padding: 3px; background: #ebe8df; }
+.auth-method-tabs button { height: 36px; color: var(--muted); background: transparent; border: 0; font-size: 9px; font-weight: 700; }
+.auth-method-tabs button.active { color: var(--ink); background: white; box-shadow: 0 1px 4px rgba(20,40,36,.08); }
+.account-summary { display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: center; margin-top: 22px; padding: 18px; background: #f2eee5; }
+.account-summary .avatar { width: 45px; height: 45px; display: grid; place-items: center; color: white; background: var(--green); border-radius: 50%; font-size: 10px; }
+.account-summary strong { display: block; font: 600 12px var(--serif); }
+.account-summary p { margin: 3px 0; color: var(--muted); font-size: 9px; }
+.account-summary small { color: #87928e; font-size: 8px; }
+.account-actions { display: flex; gap: 8px; align-items: center; }
+.password-form { margin-top: 16px; }
+.role-pills-form { margin-top: 8px; }
+.role-pills-form button { flex: 1; height: 34px; }
 .toast { position: fixed; right: 26px; bottom: 26px; z-index: 100; display: flex; align-items: center; gap: 10px; max-width: 390px; padding: 13px 18px; color: white; background: var(--ink); box-shadow: 0 16px 40px rgba(12,35,32,.24); opacity: 0; transform: translateY(20px); pointer-events: none; transition: .25s ease; font-size: 11px; }
 .toast i { width: 7px; height: 7px; flex: 0 0 auto; background: #75c2b4; border-radius: 50%; }
 .toast-error i { background: #f19673; }

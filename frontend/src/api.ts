@@ -7,9 +7,14 @@ import type {
   RunEvent,
   RunSnapshot,
   RuntimeSummary,
+  Role,
+  TokenPair,
+  User,
 } from "./types";
 
-const API_KEY_STORAGE = "atlas-research-api-key";
+const ACCESS_TOKEN_STORAGE = "atlas-research-access-token";
+const REFRESH_TOKEN_STORAGE = "atlas-research-refresh-token";
+const USER_STORAGE = "atlas-research-user";
 
 export class ApiError extends Error {
   constructor(
@@ -21,12 +26,36 @@ export class ApiError extends Error {
 }
 
 export function getApiKey(): string {
-  return sessionStorage.getItem(API_KEY_STORAGE) ?? "";
+  return sessionStorage.getItem(ACCESS_TOKEN_STORAGE) ?? "";
 }
 
 export function setApiKey(value: string): void {
-  if (value.trim()) sessionStorage.setItem(API_KEY_STORAGE, value.trim());
-  else sessionStorage.removeItem(API_KEY_STORAGE);
+  clearSession();
+  if (value.trim()) sessionStorage.setItem(ACCESS_TOKEN_STORAGE, value.trim());
+  window.dispatchEvent(new Event("atlas:auth-changed"));
+}
+
+export function getCurrentUser(): User | null {
+  const raw = sessionStorage.getItem(USER_STORAGE);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as User;
+  } catch {
+    return null;
+  }
+}
+
+function saveSession(pair: TokenPair): void {
+  sessionStorage.setItem(ACCESS_TOKEN_STORAGE, pair.access_token);
+  sessionStorage.setItem(REFRESH_TOKEN_STORAGE, pair.refresh_token);
+  sessionStorage.setItem(USER_STORAGE, JSON.stringify(pair.user));
+  window.dispatchEvent(new Event("atlas:auth-changed"));
+}
+
+export function clearSession(): void {
+  sessionStorage.removeItem(ACCESS_TOKEN_STORAGE);
+  sessionStorage.removeItem(REFRESH_TOKEN_STORAGE);
+  sessionStorage.removeItem(USER_STORAGE);
 }
 
 function authHeaders(): HeadersInit {
@@ -44,15 +73,99 @@ async function messageFrom(response: Response): Promise<string> {
 }
 
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return requestWithRefresh<T>(path, init, true);
+}
+
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function refreshSession(): Promise<boolean> {
+  const refreshToken = sessionStorage.getItem(REFRESH_TOKEN_STORAGE);
+  if (!refreshToken) return false;
+  if (!refreshInFlight) {
+    refreshInFlight = fetch("/v1/auth/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    }).then(async (response) => {
+      if (!response.ok) {
+        clearSession();
+        window.dispatchEvent(new Event("atlas:auth-changed"));
+        return false;
+      }
+      saveSession((await response.json()) as TokenPair);
+      return true;
+    }).finally(() => { refreshInFlight = null; });
+  }
+  return refreshInFlight;
+}
+
+async function requestWithRefresh<T>(path: string, init: RequestInit, retry: boolean): Promise<T> {
   const headers = new Headers(init.headers);
   Object.entries(authHeaders()).forEach(([key, value]) => headers.set(key, value));
   if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   const response = await fetch(path, { ...init, headers });
+  if (response.status === 401 && retry && await refreshSession()) {
+    return requestWithRefresh<T>(path, init, false);
+  }
   if (!response.ok) throw new ApiError(await messageFrom(response), response.status);
+  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
+
+export const identityApi = {
+  async login(tenantId: string, email: string, password: string): Promise<User> {
+    const pair = await requestWithRefresh<TokenPair>("/v1/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ tenant_id: tenantId, email, password }),
+    }, false);
+    saveSession(pair);
+    return pair.user;
+  },
+  async me(): Promise<User> {
+    const user = await request<User>("/v1/auth/me");
+    sessionStorage.setItem(USER_STORAGE, JSON.stringify(user));
+    window.dispatchEvent(new Event("atlas:auth-changed"));
+    return user;
+  },
+  async logout(): Promise<void> {
+    const refreshToken = sessionStorage.getItem(REFRESH_TOKEN_STORAGE);
+    try {
+      if (refreshToken) {
+        await fetch("/v1/auth/logout", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+      }
+    } finally {
+      clearSession();
+      window.dispatchEvent(new Event("atlas:auth-changed"));
+    }
+  },
+  async changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    await request<void>("/v1/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    });
+    clearSession();
+    window.dispatchEvent(new Event("atlas:auth-changed"));
+  },
+};
+
+export const usersApi = {
+  list: () => request<User[]>("/v1/users?limit=200"),
+  create: (payload: { email: string; display_name: string; password: string; roles: Role[] }) =>
+    request<User>("/v1/users", { method: "POST", body: JSON.stringify(payload) }),
+  update: (userId: string, payload: { display_name?: string; roles?: Role[]; is_active?: boolean }) =>
+    request<User>(`/v1/users/${userId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  resetPassword: (userId: string, newPassword: string) =>
+    request<void>(`/v1/users/${userId}/reset-password`, {
+      method: "POST",
+      body: JSON.stringify({ new_password: newPassword }),
+    }),
+};
 
 export const researchApi = {
   submit(payload: ResearchRequest): Promise<RunSnapshot> {

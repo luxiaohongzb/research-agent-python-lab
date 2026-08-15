@@ -5,15 +5,18 @@ import {
   FileText,
   KeyRound,
   LayoutDashboard,
+  LogOut,
   Menu,
   Settings2,
   ShieldCheck,
+  UserRound,
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
-import { getApiKey, setApiKey } from "../api";
+import { getApiKey, getCurrentUser, identityApi, setApiKey } from "../api";
 import { useApp } from "../app-context";
+import type { User } from "../types";
 
 const pageNames: Record<string, { eyebrow: string; title: string }> = {
   "/workbench": { eyebrow: "RESEARCH STUDIO", title: "研究工作台" },
@@ -25,6 +28,15 @@ export function Layout(): React.JSX.Element {
   const [menuOpen, setMenuOpen] = useState(false);
   const [keyOpen, setKeyOpen] = useState(false);
   const [keyValue, setKeyValue] = useState("");
+  const [authMethod, setAuthMethod] = useState<"account" | "key">("account");
+  const [tenantId, setTenantId] = useState("default");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [user, setUser] = useState<User | null>(() => getCurrentUser());
   const [ready, setReady] = useState<boolean | null>(null);
   const location = useLocation();
   const { notify } = useApp();
@@ -43,10 +55,18 @@ export function Layout(): React.JSX.Element {
   useEffect(() => {
     const open = (): void => {
       setKeyValue(getApiKey());
+      setAuthMethod("account");
+      setPasswordOpen(false);
       setKeyOpen(true);
     };
+    const changed = (): void => setUser(getCurrentUser());
     window.addEventListener("atlas:open-key", open);
-    return () => window.removeEventListener("atlas:open-key", open);
+    window.addEventListener("atlas:auth-changed", changed);
+    if (getApiKey()) void identityApi.me().then(setUser).catch(() => undefined);
+    return () => {
+      window.removeEventListener("atlas:open-key", open);
+      window.removeEventListener("atlas:auth-changed", changed);
+    };
   }, []);
 
   function saveKey(event: React.FormEvent): void {
@@ -54,6 +74,46 @@ export function Layout(): React.JSX.Element {
     setApiKey(keyValue);
     setKeyOpen(false);
     notify(keyValue.trim() ? "访问密钥已保存到当前标签页" : "已切换为无密钥访问", "success");
+  }
+
+  async function signIn(event: React.FormEvent): Promise<void> {
+    event.preventDefault();
+    setAuthBusy(true);
+    try {
+      const current = await identityApi.login(tenantId.trim(), email.trim(), password);
+      setUser(current);
+      setPassword("");
+      setKeyOpen(false);
+      notify(`欢迎回来，${current.display_name}`, "success");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "登录失败", "error");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function signOut(): Promise<void> {
+    await identityApi.logout();
+    setUser(null);
+    setKeyOpen(false);
+    notify("已安全退出当前账号", "info");
+  }
+
+  async function changePassword(event: React.FormEvent): Promise<void> {
+    event.preventDefault();
+    setAuthBusy(true);
+    try {
+      await identityApi.changePassword(currentPassword, newPassword);
+      setUser(null);
+      setCurrentPassword("");
+      setNewPassword("");
+      setPasswordOpen(false);
+      notify("密码已修改，请重新登录", "success");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "密码修改失败", "error");
+    } finally {
+      setAuthBusy(false);
+    }
   }
 
   return (
@@ -113,8 +173,8 @@ export function Layout(): React.JSX.Element {
         >
           <span className="avatar">AR</span>
           <span className="profile-copy">
-            <strong>访问凭证</strong>
-            <small>{getApiKey() ? "已配置密钥" : "本地开发模式"}</small>
+            <strong>{user?.display_name ?? "访问凭证"}</strong>
+            <small>{user ? `${user.tenant_id} · ${user.roles.join(" / ")}` : getApiKey() ? "已配置密钥" : "本地开发模式"}</small>
           </span>
           <Settings2 size={17} />
         </button>
@@ -138,7 +198,7 @@ export function Layout(): React.JSX.Element {
               <i /> {ready === null ? "检测中" : ready ? "服务就绪" : "服务异常"}
             </span>
             <button className="button button-ghost header-key" type="button" onClick={() => window.dispatchEvent(new Event("atlas:open-key"))}>
-              <KeyRound size={16} /> 访问密钥
+              {user ? <UserRound size={16} /> : <KeyRound size={16} />} {user ? user.display_name : "登录 / 密钥"}
             </button>
           </div>
         </header>
@@ -153,16 +213,62 @@ export function Layout(): React.JSX.Element {
               <button className="icon-button" type="button" aria-label="关闭" onClick={() => setKeyOpen(false)}><X size={19} /></button>
             </div>
             <p className="eyebrow">SECURE ACCESS</p>
-            <h2 id="key-title">配置访问密钥</h2>
-            <p className="modal-description">生产环境使用 Bearer API Key。密钥只保存在当前浏览器标签页，关闭后自动清除。</p>
-            <form onSubmit={saveKey}>
-              <label htmlFor="access-key">API Key</label>
-              <input id="access-key" type="password" autoComplete="off" value={keyValue} onChange={(event) => setKeyValue(event.target.value)} placeholder="粘贴访问密钥" autoFocus />
-              <div className="modal-actions">
-                <button className="button button-ghost" type="button" onClick={() => setKeyOpen(false)}>取消</button>
-                <button className="button button-dark" type="submit">保存密钥</button>
-              </div>
-            </form>
+            <h2 id="key-title">{user ? "当前账号" : "登录研究空间"}</h2>
+            {user ? (
+              <>
+                <div className="account-summary">
+                  <span className="avatar">{user.display_name.slice(0, 2).toUpperCase()}</span>
+                  <div><strong>{user.display_name}</strong><p>{user.email}</p><small>{user.tenant_id} · {user.roles.join(" / ")}</small></div>
+                  <div className="account-actions">
+                    <button className="button button-ghost" type="button" onClick={() => setPasswordOpen((open) => !open)}>修改密码</button>
+                    <button className="button button-ghost" type="button" onClick={() => void signOut()}><LogOut size={15} />退出</button>
+                  </div>
+                </div>
+                {passwordOpen && (
+                  <form className="password-form" onSubmit={(event) => void changePassword(event)}>
+                    <label htmlFor="current-password">当前密码</label>
+                    <input id="current-password" type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required />
+                    <label htmlFor="new-password">新密码</label>
+                    <input id="new-password" type="password" autoComplete="new-password" minLength={12} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required />
+                    <div className="modal-actions">
+                      <button className="button button-ghost" type="button" onClick={() => setPasswordOpen(false)}>取消</button>
+                      <button className="button button-dark" type="submit" disabled={authBusy}>{authBusy ? "正在保存" : "保存密码"}</button>
+                    </div>
+                  </form>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="auth-method-tabs">
+                  <button className={authMethod === "account" ? "active" : ""} type="button" onClick={() => setAuthMethod("account")}>账号登录</button>
+                  <button className={authMethod === "key" ? "active" : ""} type="button" onClick={() => setAuthMethod("key")}>API Key</button>
+                </div>
+                {authMethod === "account" ? (
+                  <form onSubmit={(event) => void signIn(event)}>
+                    <label htmlFor="tenant-id">租户 ID</label>
+                    <input id="tenant-id" value={tenantId} onChange={(event) => setTenantId(event.target.value)} autoComplete="organization" required />
+                    <label htmlFor="login-email">邮箱</label>
+                    <input id="login-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required />
+                    <label htmlFor="login-password">密码</label>
+                    <input id="login-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" minLength={12} required />
+                    <div className="modal-actions">
+                      <button className="button button-ghost" type="button" onClick={() => setKeyOpen(false)}>取消</button>
+                      <button className="button button-dark" type="submit" disabled={authBusy}>{authBusy ? "正在登录" : "登录"}</button>
+                    </div>
+                  </form>
+                ) : (
+                  <form onSubmit={saveKey}>
+                    <p className="modal-description">兼容自动化和迁移场景。凭据只保存在当前浏览器标签页。</p>
+                    <label htmlFor="access-key">API Key</label>
+                    <input id="access-key" type="password" autoComplete="off" value={keyValue} onChange={(event) => setKeyValue(event.target.value)} placeholder="粘贴访问密钥" />
+                    <div className="modal-actions">
+                      <button className="button button-ghost" type="button" onClick={() => setKeyOpen(false)}>取消</button>
+                      <button className="button button-dark" type="submit">保存密钥</button>
+                    </div>
+                  </form>
+                )}
+              </>
+            )}
           </section>
         </div>
       )}

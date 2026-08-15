@@ -39,7 +39,7 @@ Synthesize → Atomic Claims → Verify → Quality Gate
 - Prometheus 指标、运行质量摘要，以及可选 OpenTelemetry OTLP trace
 - Redis Streams 任务队列与事件日志、独立 Worker、执行租约和跨副本协作取消
 - AWS S3/MinIO Artifact Store，支持 run-scoped 隔离、分页统计与批量清理
-- 响应式科研工作台、API Key/RBAC、租户隔离、配额、审计日志与失败死信流
+- 响应式科研工作台、API Key/数据库用户 RBAC、可撤销会话、租户隔离、配额、审计日志与失败死信流
 - React + TypeScript 产品前端：研究工作台、拖放 PDF 入库、运行结果与后台管理
 - MCP Client：通过 Streamable HTTP 接入外部只读论文搜索工具，并转换为受校验的 Paper 领域对象
 - 24 条中英双语 golden cases，以及引用精度、覆盖率、支持率 CI 门禁
@@ -198,6 +198,7 @@ RESEARCH_AGENT_MODEL_OUTPUT_COST_PER_MILLION_USD=...
 src/research_agent/
 ├── api.py                 FastAPI 与异步任务接口
 ├── artifacts.py           Worker 间的大对象引用存储
+├── auth.py                角色、权限、密码哈希与访问令牌安全原语
 ├── application.py         用例编排与运行存储
 ├── citations.py           BibTeX 与 CSL JSON 导出
 ├── config.py              环境配置
@@ -208,6 +209,7 @@ src/research_agent/
 ├── evaluation.py          分层评测指标
 ├── llm_reasoner.py         结构化 LLM 与阶段级 fallback
 ├── ingestion.py            GROBID 客户端与 TEI 结构化解析
+├── identity.py             用户、会话、密码登录与 PostgreSQL RBAC 存储
 ├── observability.py       Prometheus、质量摘要与 OTLP trace
 ├── postgres_index.py       tsvector、pgvector HNSW 与 RRF
 ├── prompts.py              版本化、安全边界明确的 prompts
@@ -227,7 +229,7 @@ frontend/
 └── src/styles.css         响应式设计系统
 ```
 
-详细设计见 [架构说明](docs/architecture.md)，模型密钥与 Provider 切换见 [模型接入指南](docs/model-providers.md)，MCP 外部科研工具接入见 [MCP Client 指南](docs/mcp-client.md)，运行与恢复见 [生产工作台指南](docs/production-workbench.md)，队列与 Worker 见 [分布式运行指南](docs/distributed-runtime.md)，多 Agent 实践见 [Supervisor 指南](docs/multi-agent.md)，混合检索实践见 [全文检索指南](docs/hybrid-retrieval.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
+详细设计见 [架构说明](docs/architecture.md)，用户登录、令牌和权限见 [用户体系与 RBAC](docs/identity-rbac.md)，模型密钥与 Provider 切换见 [模型接入指南](docs/model-providers.md)，MCP 外部科研工具接入见 [MCP Client 指南](docs/mcp-client.md)，运行与恢复见 [生产工作台指南](docs/production-workbench.md)，队列与 Worker 见 [分布式运行指南](docs/distributed-runtime.md)，多 Agent 实践见 [Supervisor 指南](docs/multi-agent.md)，混合检索实践见 [全文检索指南](docs/hybrid-retrieval.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
 
 ## 设计原则
 
