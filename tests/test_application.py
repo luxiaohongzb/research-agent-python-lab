@@ -147,6 +147,7 @@ async def test_progress_events_publish_auditable_reason_act_observe_summaries() 
             "quality_gate",
         }
         for item in progress:
+            assert item.details["stage_duration_ms"] >= 0
             step_trace = item.details["step_trace"]
             assert step_trace["kind"] == "decision_summary"
             assert step_trace["reason"]
@@ -182,6 +183,8 @@ async def test_model_stream_events_are_forwarded_to_run_sse_history() -> None:
         ]
         assert all(item.details["node"] == "plan" for item in streamed)
         assert streamed[1].details["delta"] == '{"objective":'
+        assert streamed[1].details["first_token_ms"] >= 0
+        assert streamed[-1].details["model_duration_ms"] >= 0
         assert streamed[-1].details["validated"] is True
     finally:
         await service.close()

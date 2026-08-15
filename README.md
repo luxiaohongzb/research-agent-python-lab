@@ -65,6 +65,7 @@ python -m venv .venv
 python -m pip install -e ".[dev]"
 pytest
 research-agent-eval datasets/golden.jsonl --min-pass-rate 1.0
+research-agent-retrieval-bench datasets/retrieval_corpus.jsonl datasets/retrieval_cases.jsonl --k 2 --summary-only
 research-agent "agentic RAG 如何提高科研综述的可信度"
 research-agent-server --reload
 ```

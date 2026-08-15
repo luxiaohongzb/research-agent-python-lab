@@ -12,6 +12,26 @@ research-agent-eval datasets/golden.jsonl --min-pass-rate 1.0
 
 CI 在 Python 3.11 和 3.13 上执行相同门禁。失败命令返回非零退出码。
 
+## 检索消融基准
+
+仓库内置了一个小型、确定性的中英双语检索基准，用来防止关键词、向量或 RRF
+融合排序在重构中静默退化：
+
+```bash
+research-agent-retrieval-bench \
+  datasets/retrieval_corpus.jsonl \
+  datasets/retrieval_cases.jsonl \
+  --k 2 --summary-only --min-hit-rate 1.0
+```
+
+PowerShell 可将续行符换成反引号，或直接在一行执行。报告分别输出 `keyword`、
+`vector`、`hybrid_rrf` 的 Hit Rate、Recall@K、MRR 和 nDCG@K。语料文件每行包含
+`paper_id`、`title`、`text`；标注文件每行包含 `case_id`、`query` 和
+`relevant_paper_ids`。
+
+这组四篇文档的基准只承担快速回归职责，不代表生产检索质量。生产评测应使用冻结的
+真实语料快照和人工 relevance judgment，并扩大难负例、跨语言和多相关文档案例。
+
 ## Case 契约
 
 每行是一个 JSON 对象，包含：

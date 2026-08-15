@@ -49,3 +49,26 @@ async def test_grobid_client_rejects_non_pdf() -> None:
         grobid = GrobidClient(client=client)
         with pytest.raises(GrobidError, match="not a PDF"):
             await grobid.process_pdf(b"plain text", filename="paper.pdf")
+
+
+@pytest.mark.asyncio
+async def test_grobid_client_retries_transient_service_failure() -> None:
+    calls = 0
+    tei = FIXTURE.read_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503, headers={"Retry-After": "0"})
+        return httpx.Response(200, content=tei)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await GrobidClient(
+            base_url="http://grobid",
+            client=client,
+            initial_backoff_seconds=0,
+        ).process_pdf(b"%PDF-1.7 fixture", filename="paper.pdf")
+
+    assert result == tei
+    assert calls == 2

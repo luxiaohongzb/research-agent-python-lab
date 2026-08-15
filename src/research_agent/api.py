@@ -264,6 +264,9 @@ def create_app(
     grobid = grobid_client or GrobidClient(
         base_url=settings.grobid_url,
         timeout_seconds=settings.grobid_timeout_seconds,
+        max_attempts=settings.provider_max_attempts,
+        initial_backoff_seconds=settings.provider_initial_backoff_seconds,
+        max_backoff_seconds=settings.provider_max_backoff_seconds,
     )
     parser = tei_parser or TeiParser()
 

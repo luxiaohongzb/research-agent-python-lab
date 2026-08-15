@@ -33,6 +33,11 @@ jobs:
       - run: mypy src
       - run: pytest
       - run: python -m research_agent.eval_cli datasets/golden.jsonl --min-pass-rate 1.0 --summary-only
+      - run: >-
+          python -m research_agent.retrieval_bench_cli
+          datasets/retrieval_corpus.jsonl
+          datasets/retrieval_cases.jsonl
+          --k 2 --summary-only --min-hit-rate 1.0
 
   postgres-integration:
     runs-on: ubuntu-latest

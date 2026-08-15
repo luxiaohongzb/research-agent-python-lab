@@ -18,6 +18,16 @@ Query → metadata + keyword + vector + citation graph → RRF → rerank → Ev
 4. **召回后重排**：默认多样性重排限制每篇论文最多两个 Passage；安装 `ml` extra 后可以用 cross-encoder。cross-encoder 只处理几十个候选，避免全库推理成本。
 5. **摘要回退**：全文库为空或没有命中时仍使用元数据摘要，保证系统可降级。回答必须明确证据粒度，不能把摘要证据包装成全文实验结论。
 6. **数据库维度是迁移契约**：当前演示 embedding 为确定性 256 维 hash 向量。替换成科学 embedding 时必须同时新增数据库迁移，不允许运行时静默改变维度。
+7. **瞬时错误有界重试**：OpenAlex、Crossref 和 Semantic Scholar 只对网络错误、超时、429、408、425 与特定 5xx 重试。退避遵循 `Retry-After` 并加入随机抖动；400、401、403、404 等永久性错误立即返回，避免重试风暴。
+
+相关环境变量：
+
+- `RESEARCH_AGENT_PROVIDER_MAX_ATTEMPTS`：包含首次请求在内的最大尝试次数，默认 `3`；
+- `RESEARCH_AGENT_PROVIDER_INITIAL_BACKOFF_SECONDS`：首次退避，默认 `0.25` 秒；
+- `RESEARCH_AGENT_PROVIDER_MAX_BACKOFF_SECONDS`：最大退避，默认 `4` 秒。
+
+Prometheus 额外暴露 Provider attempt/retry、单次 attempt 耗时、工作流阶段耗时、模型
+首 Token 和模型总耗时。指标标签只包含有限枚举值，不记录查询、论文内容或租户数据。
 
 ## 配置矩阵
 
@@ -49,7 +59,7 @@ pytest tests/test_postgres_index.py
 - 使用领域 embedding 和自有 query-passage 标注集，而不是把某个公开模型名称当作质量保证。
 - 为 PDF 上传增加租户鉴权、恶意文件扫描、对象存储、幂等键和异步任务队列。
 - 将数据库迁移交给 Alembic 等显式迁移工具；应用启动账户不应拥有 `CREATE EXTENSION` 权限。
-- 对 GROBID 503、Semantic Scholar 429/5xx 加入退避、熔断、缓存与速率预算。
+- GROBID 继续统一到相同退避策略，并为远端 Provider 增加熔断、缓存与速率预算。
 - 评测解析覆盖率、Recall@K、nDCG@K、来源多样性、citation precision 和端到端支持率。
 - 记录模型/索引/语料版本，但避免把受版权或敏感全文写入普通日志。
 

@@ -50,10 +50,12 @@ from research_agent.providers import (
     CrossrefPaperProvider,
     OfflinePaperProvider,
     OpenAlexPaperProvider,
+    ResilientProvider,
     deduplicate_papers,
     relevance,
 )
 from research_agent.reasoner import DeterministicReasoner, Reasoned, ResearchReasoner
+from research_agent.resilience import RetryPolicy
 from research_agent.retrieval import (
     DiversityReranker,
     HashEmbeddingModel,
@@ -360,9 +362,7 @@ class ResearchWorkflow:
         request = ResearchRequest.model_validate(state["request"])
         retrieval_lanes = self._retrieval_lane_count(request.source_scope)
         tasks = [SearchTask.model_validate(item) for item in state.get("pending_tasks", [])]
-        tool_capacity = (
-            budget.max_tool_calls - budget.used_tool_calls
-        ) // retrieval_lanes
+        tool_capacity = (budget.max_tool_calls - budget.used_tool_calls) // retrieval_lanes
         capacity = min(
             len(tasks),
             budget.remaining_queries,
@@ -537,9 +537,7 @@ class ResearchWorkflow:
                     "candidates_selected": sum(item.candidates_selected for item in results),
                     "candidates_rejected": sum(item.candidates_rejected for item in results),
                     "retrieval_decisions": [
-                        decision
-                        for item in results
-                        for decision in item.retrieval_decisions
+                        decision for item in results for decision in item.retrieval_decisions
                     ][:18],
                 },
             ),
@@ -592,9 +590,7 @@ class ResearchWorkflow:
         request = ResearchRequest.model_validate(state["request"])
         retrieval_lanes = self._retrieval_lane_count(request.source_scope)
         tasks = [SearchTask.model_validate(item) for item in state.get("pending_tasks", [])]
-        tool_capacity = (
-            budget.max_tool_calls - budget.used_tool_calls
-        ) // retrieval_lanes
+        tool_capacity = (budget.max_tool_calls - budget.used_tool_calls) // retrieval_lanes
         capacity = min(budget.remaining_queries, tool_capacity)
         selected = [] if budget.exhausted_limits else tasks[:capacity]
         if not selected:
@@ -608,10 +604,7 @@ class ResearchWorkflow:
                 "trace": _trace(state, "search", "Skipped search because the budget is exhausted."),
             }
         batches = await asyncio.gather(
-            *(
-                self._retrieve(task, budget.max_papers, request.source_scope)
-                for task in selected
-            )
+            *(self._retrieve(task, budget.max_papers, request.source_scope) for task in selected)
         )
         papers = [Paper.model_validate(item) for item in state.get("papers", [])]
         passages = [Passage.model_validate(item) for item in state.get("raw_passages", [])]
@@ -643,9 +636,7 @@ class ResearchWorkflow:
                     "source_scope": request.source_scope.value,
                     "sources": self._retrieval_source_names(request.source_scope),
                     "candidates_considered": len(diagnostics),
-                    "candidates_selected": sum(
-                        bool(item.get("selected")) for item in diagnostics
-                    ),
+                    "candidates_selected": sum(bool(item.get("selected")) for item in diagnostics),
                     "candidates_rejected": sum(
                         not bool(item.get("accepted")) for item in diagnostics
                     ),
@@ -736,7 +727,8 @@ class ResearchWorkflow:
             and relevance(
                 question,
                 f"{paper_by_id[card.paper_id].title} {card.atomic_finding}",
-            ) >= 0.08
+            )
+            >= 0.08
         )
         return {
             "passages": [passage.model_dump(mode="json") for passage in passages],
@@ -769,7 +761,8 @@ class ResearchWorkflow:
                     sub_question,
                     f"{papers[card.paper_id].title if card.paper_id in papers else ''} "
                     f"{card.atomic_finding}",
-                ) >= 0.08
+                )
+                >= 0.08
                 for card in evidence
             )
             (covered_sub_questions if covered else missing_sub_questions).append(sub_question)
@@ -777,11 +770,7 @@ class ResearchWorkflow:
         evidence_depth = min(1.0, len(evidence) / max(1, len(plan.sub_questions) * 2))
         score = round(0.8 * sub_question_score + 0.2 * evidence_depth, 4)
         unique_sources = len(
-            {
-                papers[card.paper_id].source
-                for card in evidence
-                if card.paper_id in papers
-            }
+            {papers[card.paper_id].source for card in evidence if card.paper_id in papers}
         )
         return {
             "coverage_score": score,
@@ -1080,13 +1069,19 @@ def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow
         )
     citation_graph: Any = None
     if current.provider_mode == "hybrid":
+        retry_policy = RetryPolicy(
+            max_attempts=current.provider_max_attempts,
+            initial_backoff_seconds=current.provider_initial_backoff_seconds,
+            max_backoff_seconds=current.provider_max_backoff_seconds,
+        )
         client = httpx.AsyncClient(
             timeout=httpx.Timeout(current.request_timeout_seconds),
             headers={"User-Agent": "research-agent-python-lab/1.1"},
             follow_redirects=False,
         )
         providers.extend(
-            (
+            ResilientProvider(provider, policy=retry_policy)
+            for provider in (
                 OpenAlexPaperProvider(client=client, email=current.openalex_email),
                 CrossrefPaperProvider(client=client, email=current.openalex_email),
             )
@@ -1094,9 +1089,12 @@ def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow
         if current.semantic_scholar_enabled:
             from research_agent.semantic_scholar import SemanticScholarProvider
 
-            citation_graph = SemanticScholarProvider(
-                client=client,
-                api_key=current.semantic_scholar_api_key,
+            citation_graph = ResilientProvider(
+                SemanticScholarProvider(
+                    client=client,
+                    api_key=current.semantic_scholar_api_key,
+                ),
+                policy=retry_policy,
             )
             providers.append(citation_graph)
     embedding_model = HashEmbeddingModel()

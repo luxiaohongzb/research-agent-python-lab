@@ -329,11 +329,7 @@ class ResearchRetriever:
             )
             for paper in candidates
         ]
-        accepted_ids = {
-            str(decision["paper_id"])
-            for decision in decisions
-            if decision["accepted"]
-        }
+        accepted_ids = {str(decision["paper_id"]) for decision in decisions if decision["accepted"]}
         papers = sorted(
             (
                 paper.model_copy(
@@ -446,17 +442,14 @@ def _candidate_decision(
     title_overlap = query_tokens & title_tokens
     required_overlap = min(2, max(1, len(query_tokens) // 4))
     accepted = len(overlap) >= required_overlap
-    score = (
-        0.7 * (len(overlap) / max(1, len(query_tokens)))
-        + 0.3 * (len(title_overlap) / max(1, min(len(query_tokens), 5)))
+    score = 0.7 * (len(overlap) / max(1, len(query_tokens))) + 0.3 * (
+        len(title_overlap) / max(1, min(len(query_tokens), 5))
     )
     if not paper.abstract.strip() and not supporting_text.strip() and not title_overlap:
         accepted = False
         reason = "rejected: no query terms in title and no searchable abstract"
     elif not accepted:
-        reason = (
-            f"rejected: only {len(overlap)}/{required_overlap} required query terms matched"
-        )
+        reason = f"rejected: only {len(overlap)}/{required_overlap} required query terms matched"
     else:
         reason = "passed relevance gate"
     return {
