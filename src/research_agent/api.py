@@ -49,6 +49,11 @@ from research_agent.domain import (
 from research_agent.events import InMemoryRunEventBroker, RedisRunEventBroker, RunEventBroker
 from research_agent.governance import QuotaExceededError, QuotaPolicy, TenantQuota
 from research_agent.ingestion import GrobidClient, GrobidError, TeiParser
+from research_agent.mcp_client import (
+    McpServerStatus,
+    parse_mcp_paper_servers,
+    probe_mcp_paper_servers,
+)
 from research_agent.observability import RuntimeObservability, RuntimeSummary
 from research_agent.run_store import InMemoryRunStore, PostgresRunStore, RunStore
 from research_agent.workflow import ResearchWorkflow, build_default_workflow
@@ -160,7 +165,7 @@ def create_app(
 
     api = FastAPI(
         title="Research Agent Python Lab",
-        version="1.0.0",
+        version="1.1.0",
         description="Evidence-first and claim-verifiable intelligent research assistant",
         lifespan=lifespan,
     )
@@ -173,6 +178,10 @@ def create_app(
     api.mount("/metrics", make_asgi_app())
     static_dir = Path(__file__).with_name("static")
     api.mount("/assets", StaticFiles(directory=static_dir), name="assets")
+    react_dir = static_dir / "react"
+    react_index = react_dir / "index.html"
+    if react_index.exists():
+        api.mount("/ui", StaticFiles(directory=react_dir), name="react-ui")
     grobid = grobid_client or GrobidClient(
         base_url=settings.grobid_url,
         timeout_seconds=settings.grobid_timeout_seconds,
@@ -194,7 +203,15 @@ def create_app(
 
     @api.get("/workbench", include_in_schema=False)
     async def workbench() -> FileResponse:
-        return FileResponse(static_dir / "workbench.html")
+        return FileResponse(react_index if react_index.exists() else static_dir / "workbench.html")
+
+    @api.get("/library", include_in_schema=False)
+    async def library() -> FileResponse:
+        return FileResponse(react_index if react_index.exists() else static_dir / "workbench.html")
+
+    @api.get("/admin", include_in_schema=False)
+    async def admin_console() -> FileResponse:
+        return FileResponse(react_index if react_index.exists() else static_dir / "workbench.html")
 
     @api.post("/v1/research/run", response_model=ResearchResult)
     async def run_research(
@@ -356,6 +373,17 @@ def create_app(
         if active_queue is None:
             return ()
         return await active_queue.dead_letters(limit=limit)
+
+    @api.get("/v1/integrations/mcp", response_model=list[McpServerStatus])
+    async def mcp_integrations(principal: PrincipalDependency) -> tuple[McpServerStatus, ...]:
+        require_role(principal, Role.ADMIN)
+        if not settings.mcp_enabled:
+            return ()
+        configs = parse_mcp_paper_servers(settings.mcp_paper_servers_json)
+        return await probe_mcp_paper_servers(
+            configs,
+            timeout_seconds=settings.mcp_timeout_seconds,
+        )
 
     @api.post(
         "/v1/corpus/documents",

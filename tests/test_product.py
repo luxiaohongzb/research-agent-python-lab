@@ -1,4 +1,5 @@
 import json
+import re
 
 import httpx
 import pytest
@@ -52,13 +53,20 @@ async def test_workbench_is_a_public_product_entrypoint() -> None:
     )
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         page = await client.get("/workbench")
-        asset = await client.get("/assets/workbench.js")
+        library = await client.get("/library")
+        admin = await client.get("/admin")
+        asset_path = re.search(r'<script[^>]+src="([^"]+\.js)"', page.text)
+        assert asset_path is not None
+        asset = await client.get(asset_path.group(1))
         protected = await client.get("/v1/research/runs/unknown")
 
     assert page.status_code == 200
-    assert "ATLAS" in page.text
-    assert "RESEARCH" in page.text
+    assert '<div id="root"></div>' in page.text
+    assert "Atlas Research" in page.text
+    assert library.text == page.text
+    assert admin.text == page.text
     assert asset.status_code == 200
+    assert "javascript" in asset.headers["content-type"]
     assert protected.status_code == 401
 
 
@@ -87,6 +95,11 @@ async def test_api_key_rbac_tenant_isolation_and_audit() -> None:
             headers=_headers("tenant-b-researcher"),
         )
         audit = await client.get("/v1/audit/events", headers=_headers("tenant-a-admin"))
+        mcp = await client.get("/v1/integrations/mcp", headers=_headers("tenant-a-admin"))
+        forbidden_mcp = await client.get(
+            "/v1/integrations/mcp",
+            headers=_headers("tenant-b-researcher"),
+        )
 
     assert first.status_code == 202
     assert second.status_code == 202
@@ -96,6 +109,9 @@ async def test_api_key_rbac_tenant_isolation_and_audit() -> None:
     assert audit.status_code == 200
     assert audit.json()[0]["actor"] == "alice@example.com"
     assert audit.json()[0]["action"] == "research.submitted"
+    assert mcp.status_code == 200
+    assert mcp.json() == []
+    assert forbidden_mcp.status_code == 403
 
 
 @pytest.mark.asyncio

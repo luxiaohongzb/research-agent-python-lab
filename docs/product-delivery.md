@@ -1,4 +1,13 @@
-# Atlas Research v1.0 产品交付手册
+# Atlas Research v1.1 产品交付手册
+
+## React 产品入口
+
+- `/workbench`：创建研究任务、查看实时执行轨迹、报告、Claim 核验和论文来源；
+- `/library`：拖放上传 PDF，查看 GROBID 解析进度与当前标签页的最近入库记录；
+- `/admin`：管理员查看运行指标、状态分布、MCP Server、审计日志和失败死信；
+- `/docs`：FastAPI 接口文档。
+
+前端源代码位于 `frontend/`。Docker 和 CI 会自动执行生产构建；宿主机开发可在该目录运行 `npm install` 和 `npm run dev`，请求会代理到本机 `8000` 端口的 API。
 
 ## 交付范围
 

@@ -1,0 +1,10 @@
+.git
+.github
+.venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+**/__pycache__
+**/*.pyc
+frontend/node_modules
+src/research_agent/static/react

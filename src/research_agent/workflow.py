@@ -716,11 +716,26 @@ class ResearchWorkflow:
 def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow:
     current = settings or get_settings()
     providers: list[Any] = [OfflinePaperProvider()]
+    if current.mcp_enabled:
+        from research_agent.mcp_client import (
+            build_mcp_paper_providers,
+            parse_mcp_paper_servers,
+        )
+
+        mcp_configs = parse_mcp_paper_servers(current.mcp_paper_servers_json)
+        if not mcp_configs:
+            raise RuntimeError("MCP is enabled but RESEARCH_AGENT_MCP_PAPER_SERVERS_JSON is empty")
+        providers.extend(
+            build_mcp_paper_providers(
+                mcp_configs,
+                timeout_seconds=current.mcp_timeout_seconds,
+            )
+        )
     citation_graph: Any = None
     if current.provider_mode == "hybrid":
         client = httpx.AsyncClient(
             timeout=httpx.Timeout(current.request_timeout_seconds),
-            headers={"User-Agent": "research-agent-python-lab/0.1"},
+            headers={"User-Agent": "research-agent-python-lab/1.1"},
             follow_redirects=False,
         )
         providers.extend(

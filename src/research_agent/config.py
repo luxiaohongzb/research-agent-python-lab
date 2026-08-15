@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     openalex_email: str | None = None
     semantic_scholar_enabled: bool = False
     semantic_scholar_api_key: str | None = None
+    mcp_enabled: bool = False
+    mcp_paper_servers_json: str = "[]"
+    mcp_timeout_seconds: float = Field(default=45.0, gt=0, le=300)
     database_url: str = "postgresql://research:research@127.0.0.1:5432/research_agent"
     redis_url: str = "redis://127.0.0.1:6379/0"
     redis_prefix: str = "research-agent"

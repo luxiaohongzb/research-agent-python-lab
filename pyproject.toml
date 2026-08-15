@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "research-agent-python-lab"
-version = "1.0.0"
+version = "1.1.0"
 description = "Evidence-first, budget-aware research agent built with Python and LangGraph"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -38,6 +38,7 @@ distributed = [
   "boto3>=1.40,<2",
   "redis>=6.4,<8",
 ]
+mcp = ["mcp>=2.0.0,<3"]
 ml = ["sentence-transformers>=5.1,<6"]
 dev = [
   "mypy>=1.17,<2",

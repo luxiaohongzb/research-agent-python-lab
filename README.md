@@ -2,7 +2,7 @@
 
 一个证据优先、预算受控、可核验的 Python 智能科研助理。项目用于学习 Agent 工程、准备面试，也可以继续演进为生产系统。
 
-**v1.0 已可交付：** 打开 `http://127.0.0.1:8000/workbench` 即可使用中文科研工作台；支持 API Key/RBAC、租户隔离、配额、审计、分布式 Worker 和失败死信流。部署、安全配置与验收步骤见 [产品交付手册](docs/product-delivery.md)。
+**v1.1 已可交付：** 打开 `http://127.0.0.1:8000/workbench` 使用 React 科研工作台，`/library` 管理论文入库，`/admin` 查看系统运营状态；支持 API Key/RBAC、租户隔离、配额、审计、分布式 Worker、失败死信流和 MCP 科研工具接入。部署、安全配置与验收步骤见 [产品交付手册](docs/product-delivery.md)。
 
 它不是“让一个模型无限搜索并直接写报告”的 Demo，而是把研究过程拆成可测试的状态图：
 
@@ -40,6 +40,8 @@ Synthesize → Atomic Claims → Verify → Quality Gate
 - Redis Streams 任务队列与事件日志、独立 Worker、执行租约和跨副本协作取消
 - AWS S3/MinIO Artifact Store，支持 run-scoped 隔离、分页统计与批量清理
 - 响应式科研工作台、API Key/RBAC、租户隔离、配额、审计日志与失败死信流
+- React + TypeScript 产品前端：研究工作台、拖放 PDF 入库、运行结果与后台管理
+- MCP Client：通过 Streamable HTTP 接入外部只读论文搜索工具，并转换为受校验的 Paper 领域对象
 - 24 条中英双语 golden cases，以及引用精度、覆盖率、支持率 CI 门禁
 
 ## 技术栈
@@ -65,7 +67,17 @@ research-agent "agentic RAG 如何提高科研综述的可信度"
 research-agent-server --reload
 ```
 
-打开 `http://127.0.0.1:8000/workbench` 使用产品工作台，或打开 `http://127.0.0.1:8000/docs` 查看接口文档。
+打开 `http://127.0.0.1:8000/workbench` 使用研究工作台，`http://127.0.0.1:8000/library` 上传论文，`http://127.0.0.1:8000/admin` 进入后台管理；或打开 `http://127.0.0.1:8000/docs` 查看接口文档。
+
+前端源代码位于 `frontend/`。本地修改 React 页面时使用：
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+生产构建使用 `npm run build`，产物会写入 Python 包的 `static/react` 目录；Docker 与 CI 会自动执行该步骤。
 
 ### 同步执行
 
@@ -196,9 +208,15 @@ src/research_agent/
 ├── server.py              跨平台 API 启动入口
 ├── worker.py              独立分布式 Worker 入口
 └── workflow.py            LangGraph 状态图和质量门禁
+
+frontend/
+├── src/pages/             研究、文献库与管理页面
+├── src/components/        应用布局和通用交互
+├── src/api.ts             FastAPI 客户端与 SSE/PDF 上传
+└── src/styles.css         响应式设计系统
 ```
 
-详细设计见 [架构说明](docs/architecture.md)，运行与恢复见 [生产工作台指南](docs/production-workbench.md)，队列与 Worker 见 [分布式运行指南](docs/distributed-runtime.md)，多 Agent 实践见 [Supervisor 指南](docs/multi-agent.md)，混合检索实践见 [全文检索指南](docs/hybrid-retrieval.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
+详细设计见 [架构说明](docs/architecture.md)，MCP 外部科研工具接入见 [MCP Client 指南](docs/mcp-client.md)，运行与恢复见 [生产工作台指南](docs/production-workbench.md)，队列与 Worker 见 [分布式运行指南](docs/distributed-runtime.md)，多 Agent 实践见 [Supervisor 指南](docs/multi-agent.md)，混合检索实践见 [全文检索指南](docs/hybrid-retrieval.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
 
 ## 设计原则
 
