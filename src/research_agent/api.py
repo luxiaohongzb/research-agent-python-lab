@@ -165,7 +165,7 @@ def create_app(
 
     api = FastAPI(
         title="Research Agent Python Lab",
-        version="1.1.0",
+        version="1.2.0",
         description="Evidence-first and claim-verifiable intelligent research assistant",
         lifespan=lifespan,
     )

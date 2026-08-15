@@ -2,7 +2,7 @@
 
 一个证据优先、预算受控、可核验的 Python 智能科研助理。项目用于学习 Agent 工程、准备面试，也可以继续演进为生产系统。
 
-**v1.1 已可交付：** 打开 `http://127.0.0.1:8000/workbench` 使用 React 科研工作台，`/library` 管理论文入库，`/admin` 查看系统运营状态；支持 API Key/RBAC、租户隔离、配额、审计、分布式 Worker、失败死信流和 MCP 科研工具接入。部署、安全配置与验收步骤见 [产品交付手册](docs/product-delivery.md)。
+**v1.2 已可交付：** 打开 `http://127.0.0.1:8000/workbench` 使用 React 科研工作台，`/library` 管理论文入库，`/admin` 查看系统运营状态；支持 API Key/RBAC、租户隔离、配额、审计、分布式 Worker、失败死信流、MCP 科研工具以及 OpenAI/DeepSeek 模型接入。部署、安全配置与验收步骤见 [产品交付手册](docs/product-delivery.md)。
 
 它不是“让一个模型无限搜索并直接写报告”的 Demo，而是把研究过程拆成可测试的状态图：
 
@@ -174,6 +174,17 @@ export RESEARCH_AGENT_MODEL=gpt-5-mini
 
 Windows PowerShell 使用 `$env:OPENAI_API_KEY="..."` 形式。模型调用采用原生 `json_schema`，所有模型返回值还会经过业务语义校验。单阶段失败会回退确定性 reasoner，并在 `warnings` 和 `model_invocations` 中留痕。
 
+启用 DeepSeek：
+
+```bash
+export DEEPSEEK_API_KEY="..."
+export RESEARCH_AGENT_REASONER_MODE=deepseek
+export RESEARCH_AGENT_DEEPSEEK_MODEL=deepseek-v4-pro
+export RESEARCH_AGENT_DEEPSEEK_BASE_URL=https://api.deepseek.com
+```
+
+DeepSeek 通过 OpenAI 兼容的 Chat Completions 接入，使用 `json_object` 输出后继续执行 Pydantic、引用白名单和业务语义校验。`deepseek-v4-pro` 适合高质量科研任务，`deepseek-v4-flash` 适合低成本演示。Docker 用户把相同变量写入根目录 `.env` 后，重建 `api` 和 `worker` 即可。不要把模型密钥写入 React 前端或提交到 Git。
+
 模型价格不会硬编码。需要费用估算时，配置当前模型的每百万 token 价格：
 
 ```bash
@@ -216,7 +227,7 @@ frontend/
 └── src/styles.css         响应式设计系统
 ```
 
-详细设计见 [架构说明](docs/architecture.md)，MCP 外部科研工具接入见 [MCP Client 指南](docs/mcp-client.md)，运行与恢复见 [生产工作台指南](docs/production-workbench.md)，队列与 Worker 见 [分布式运行指南](docs/distributed-runtime.md)，多 Agent 实践见 [Supervisor 指南](docs/multi-agent.md)，混合检索实践见 [全文检索指南](docs/hybrid-retrieval.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
+详细设计见 [架构说明](docs/architecture.md)，模型密钥与 Provider 切换见 [模型接入指南](docs/model-providers.md)，MCP 外部科研工具接入见 [MCP Client 指南](docs/mcp-client.md)，运行与恢复见 [生产工作台指南](docs/production-workbench.md)，队列与 Worker 见 [分布式运行指南](docs/distributed-runtime.md)，多 Agent 实践见 [Supervisor 指南](docs/multi-agent.md)，混合检索实践见 [全文检索指南](docs/hybrid-retrieval.md)，评测方法见 [评测指南](docs/evaluation.md)，迭代计划见 [路线图](docs/roadmap.md)，面试讲法见 [面试指南](docs/interview-guide.md)。
 
 ## 设计原则
 

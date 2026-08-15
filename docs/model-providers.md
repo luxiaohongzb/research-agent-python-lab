@@ -1,0 +1,52 @@
+# 模型 Provider 接入
+
+项目默认使用 `deterministic`，无需密钥即可运行。OpenAI 与 DeepSeek 只替换规划、证据提取、综合和核验 Reasoner，不改变检索、预算、引用白名单、质量门禁和阶段级 fallback。
+
+## DeepSeek
+
+在仓库根目录创建或修改 `.env`：
+
+```dotenv
+RESEARCH_AGENT_REASONER_MODE=deepseek
+DEEPSEEK_API_KEY=sk-replace-with-real-key
+RESEARCH_AGENT_DEEPSEEK_MODEL=deepseek-v4-pro
+RESEARCH_AGENT_DEEPSEEK_BASE_URL=https://api.deepseek.com
+RESEARCH_AGENT_MODEL_TIMEOUT_SECONDS=120
+RESEARCH_AGENT_MODEL_MAX_RETRIES=3
+```
+
+推荐模型：
+
+- `deepseek-v4-pro`：优先科研推理和核验质量；
+- `deepseek-v4-flash`：优先响应速度和演示成本。
+
+DeepSeek 使用 OpenAI 兼容的 Chat Completions，不使用 OpenAI Responses API。结构化阶段采用 `response_format={"type":"json_object"}`，Prompt 会携带 Pydantic JSON Schema；返回值仍由 Pydantic 和领域语义规则二次校验。失败会有限重试，再回退确定性 Reasoner，并在 `model_invocations` 和 `warnings` 中留痕。
+
+启动或切换配置：
+
+```bash
+docker compose up -d --build --force-recreate api worker
+```
+
+密钥只放在 `.env` 或生产 Secret Manager，不写入 React、Compose 文件、运行结果、日志或 Git。官方参考：[模型列表](https://api-docs.deepseek.com/api/list-models)、[JSON Output](https://api-docs.deepseek.com/zh-cn/guides/json_mode/)。
+
+## OpenAI
+
+```dotenv
+RESEARCH_AGENT_REASONER_MODE=openai
+OPENAI_API_KEY=replace-with-real-key
+RESEARCH_AGENT_MODEL=gpt-5-mini
+```
+
+OpenAI 路径继续使用 Responses API 与原生严格 JSON Schema。
+
+## 费用留痕
+
+模型价格不会硬编码。需要估算时，根据供应商当前价格设置：
+
+```dotenv
+RESEARCH_AGENT_MODEL_INPUT_COST_PER_MILLION_USD=...
+RESEARCH_AGENT_MODEL_OUTPUT_COST_PER_MILLION_USD=...
+```
+
+如果通过 Docker 运行，还需把这两个可选变量加入部署环境或 Secret/Config 管理系统；未配置时仍记录 Token，但不估算费用。

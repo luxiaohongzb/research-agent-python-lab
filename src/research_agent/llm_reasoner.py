@@ -109,6 +109,7 @@ class LangChainStructuredReasoner:
         *,
         provider: str,
         model_name: str,
+        structured_output_method: Literal["json_schema", "json_mode"] = "json_schema",
         schema_attempts: int = 2,
         input_cost_per_million_usd: float | None = None,
         output_cost_per_million_usd: float | None = None,
@@ -116,6 +117,7 @@ class LangChainStructuredReasoner:
         self._model = model
         self._provider = provider
         self._model_name = model_name
+        self._structured_output_method = structured_output_method
         self._schema_attempts = schema_attempts
         self._input_cost_per_million_usd = input_cost_per_million_usd
         self._output_cost_per_million_usd = output_cost_per_million_usd
@@ -314,14 +316,21 @@ class LangChainStructuredReasoner:
         for attempt in range(1, self._schema_attempts + 1):
             started = perf_counter()
             try:
-                runnable = self._model.with_structured_output(
-                    schema,
-                    method="json_schema",
-                    strict=True,
-                    include_raw=True,
-                )
+                structured_options: dict[str, Any] = {
+                    "method": self._structured_output_method,
+                    "include_raw": True,
+                }
+                if self._structured_output_method == "json_schema":
+                    structured_options["strict"] = True
+                runnable = self._model.with_structured_output(schema, **structured_options)
+                effective_system_prompt = system_prompt
+                if self._structured_output_method == "json_mode":
+                    effective_system_prompt = (
+                        f"{system_prompt}\nReturn exactly one JSON object that validates against "
+                        f"this JSON Schema: {json.dumps(schema.model_json_schema())}"
+                    )
                 messages = [
-                    SystemMessage(content=system_prompt),
+                    SystemMessage(content=effective_system_prompt),
                     HumanMessage(
                         content=json.dumps(
                             {"attempt": attempt, "input": payload},

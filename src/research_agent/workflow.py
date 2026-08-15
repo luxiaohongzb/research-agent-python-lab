@@ -777,7 +777,7 @@ def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow
     else:
         artifact_store = InMemoryArtifactStore()
     reasoner: ResearchReasoner = DeterministicReasoner()
-    if current.reasoner_mode == "openai":
+    if current.reasoner_mode in {"openai", "deepseek"}:
         try:
             from langchain_openai import ChatOpenAI
         except ImportError as exc:
@@ -789,18 +789,43 @@ def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow
             LangChainStructuredReasoner,
         )
 
-        model = ChatOpenAI(
-            model=current.model,
-            timeout=current.model_timeout_seconds,
-            max_retries=current.model_max_retries,
-            use_responses_api=True,
-            output_version="responses/v1",
-        )
+        structured_output_method: Literal["json_schema", "json_mode"]
+        if current.reasoner_mode == "deepseek":
+            if (
+                current.deepseek_api_key is None
+                or not current.deepseek_api_key.get_secret_value().strip()
+            ):
+                raise RuntimeError(
+                    "DeepSeek mode requires DEEPSEEK_API_KEY or RESEARCH_AGENT_DEEPSEEK_API_KEY"
+                )
+            model_name = current.deepseek_model
+            provider = "deepseek"
+            structured_output_method = "json_mode"
+            model = ChatOpenAI(
+                model=model_name,
+                api_key=current.deepseek_api_key,
+                base_url=str(current.deepseek_base_url).rstrip("/"),
+                timeout=current.model_timeout_seconds,
+                max_retries=current.model_max_retries,
+                use_responses_api=False,
+            )
+        else:
+            model_name = current.model
+            provider = "openai"
+            structured_output_method = "json_schema"
+            model = ChatOpenAI(
+                model=model_name,
+                timeout=current.model_timeout_seconds,
+                max_retries=current.model_max_retries,
+                use_responses_api=True,
+                output_version="responses/v1",
+            )
         reasoner = FallbackResearchReasoner(
             LangChainStructuredReasoner(
                 model,
-                provider="openai",
-                model_name=current.model,
+                provider=provider,
+                model_name=model_name,
+                structured_output_method=structured_output_method,
                 input_cost_per_million_usd=current.model_input_cost_per_million_usd,
                 output_cost_per_million_usd=current.model_output_cost_per_million_usd,
             )

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field, HttpUrl, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     )
 
     provider_mode: Literal["offline", "hybrid"] = "offline"
-    reasoner_mode: Literal["deterministic", "openai"] = "deterministic"
+    reasoner_mode: Literal["deterministic", "openai", "deepseek"] = "deterministic"
     index_mode: Literal["memory", "postgres"] = "memory"
     checkpoint_mode: Literal["memory", "postgres"] = "memory"
     run_store_mode: Literal["memory", "postgres"] = "memory"
@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     default_max_papers: int = Field(default=8, ge=1, le=50)
     default_max_iterations: int = Field(default=2, ge=1, le=5)
     model: str = "gpt-5-mini"
+    deepseek_model: str = "deepseek-v4-pro"
+    deepseek_base_url: HttpUrl = HttpUrl("https://api.deepseek.com")
+    deepseek_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "DEEPSEEK_API_KEY",
+            "RESEARCH_AGENT_DEEPSEEK_API_KEY",
+        ),
+    )
     model_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
     model_max_retries: int = Field(default=3, ge=0, le=10)
     model_input_cost_per_million_usd: float | None = Field(default=None, ge=0)

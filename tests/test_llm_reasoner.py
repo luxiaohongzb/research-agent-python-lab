@@ -110,14 +110,35 @@ class ScriptedModel:
         self._fail = fail
         self._input_tokens = input_tokens
         self._output_tokens = output_tokens
+        self.structured_options: list[dict[str, Any]] = []
 
-    def with_structured_output(self, schema: type[Any], **_: Any) -> ScriptedRunnable:
+    def with_structured_output(self, schema: type[Any], **options: Any) -> ScriptedRunnable:
+        self.structured_options.append(options)
         return ScriptedRunnable(
             schema,
             fail=self._fail,
             input_tokens=self._input_tokens,
             output_tokens=self._output_tokens,
         )
+
+
+@pytest.mark.asyncio
+async def test_json_mode_uses_deepseek_compatible_structured_output() -> None:
+    model = ScriptedModel()
+    reasoner = LangChainStructuredReasoner(
+        model,
+        provider="deepseek",
+        model_name="deepseek-v4-pro",
+        structured_output_method="json_mode",
+    )
+
+    result = await reasoner.plan(
+        ResearchRequest(question="How should scientific claims be verified?")
+    )
+
+    assert result.value.search_tasks
+    assert model.structured_options == [{"method": "json_mode", "include_raw": True}]
+    assert result.model_invocations[0].provider == "deepseek"
 
 
 @pytest.mark.asyncio

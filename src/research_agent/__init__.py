@@ -10,4 +10,4 @@ __all__ = [
     "build_default_workflow",
 ]
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
