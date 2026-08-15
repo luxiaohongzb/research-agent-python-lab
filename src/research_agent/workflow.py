@@ -4,7 +4,7 @@ import asyncio
 import operator
 import time
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any, Literal, TypedDict, cast
+from typing import Annotated, Any, Literal, TypedDict, TypeVar, cast
 from uuid import uuid4
 
 import httpx
@@ -50,7 +50,7 @@ from research_agent.providers import (
     OpenAlexPaperProvider,
     deduplicate_papers,
 )
-from research_agent.reasoner import DeterministicReasoner, ResearchReasoner
+from research_agent.reasoner import DeterministicReasoner, Reasoned, ResearchReasoner
 from research_agent.retrieval import (
     DiversityReranker,
     HashEmbeddingModel,
@@ -92,6 +92,9 @@ class WorkerState(TypedDict):
     worker_outputs: Annotated[list[dict[str, Any]], operator.add]
 
 
+ReasonedValueT = TypeVar("ReasonedValueT")
+
+
 class ResearchWorkflow:
     def __init__(
         self,
@@ -101,6 +104,7 @@ class ResearchWorkflow:
         reasoner: ResearchReasoner | None = None,
         artifact_store: ArtifactStore | None = None,
         worker_timeout_seconds: float = 45.0,
+        model_max_concurrency: int = 1,
         checkpoint_dsn: str | None = None,
     ) -> None:
         if retriever is None:
@@ -112,6 +116,7 @@ class ResearchWorkflow:
         self._reasoner = reasoner or self._baseline_reasoner
         self._artifact_store = artifact_store or InMemoryArtifactStore()
         self._worker_timeout_seconds = worker_timeout_seconds
+        self._model_max_concurrency = max(1, model_max_concurrency)
         self._checkpointer = InMemorySaver()
         self._checkpoint_dsn = checkpoint_dsn
         self._checkpoint_context: Any = None
@@ -450,7 +455,16 @@ class ResearchWorkflow:
 
     async def _plan(self, state: ResearchState) -> dict[str, Any]:
         request = ResearchRequest.model_validate(state["request"])
-        reasoned = await self._reasoner.plan(request)
+        try:
+            async with asyncio.timeout(request.max_elapsed_seconds):
+                reasoned = await self._reasoner.plan(request)
+        except TimeoutError:
+            fallback = await self._baseline_reasoner.plan(request)
+            reasoned = Reasoned(
+                fallback.value,
+                fallback.model_invocations,
+                ("plan exceeded the run deadline; deterministic fallback used.",),
+            )
         plan = reasoned.value
         return {
             "plan": plan.model_dump(mode="json"),
@@ -531,7 +545,8 @@ class ResearchWorkflow:
         }
 
     async def _extract_evidence(self, state: ResearchState) -> dict[str, Any]:
-        question = ResearchRequest.model_validate(state["request"]).question
+        request = ResearchRequest.model_validate(state["request"])
+        question = request.question
         papers = tuple(Paper.model_validate(item) for item in state.get("papers", []))
         paper_by_id = {paper.paper_id: paper for paper in papers}
         retrieved = tuple(
@@ -550,30 +565,30 @@ class ResearchWorkflow:
             if paper.abstract.strip() and paper.paper_id not in full_text_paper_ids
         )
         passages = (*retrieved, *abstract_fallback)
-        if self._reasoner is self._baseline_reasoner:
-            reasoned_cards = list(
-                await asyncio.gather(
-                    *(
-                        self._reasoner.extract_evidence(
-                            question, paper_by_id[passage.paper_id], passage
-                        )
-                        for passage in passages
+        reasoned_cards: list[Reasoned[EvidenceCard | None]] = []
+        stage_budget = _budget_with_elapsed(state)
+        concurrency = min(self._model_max_concurrency, request.max_workers)
+        for offset in range(0, len(passages), concurrency):
+            batch = passages[offset : offset + concurrency]
+            use_model = (
+                self._reasoner is not self._baseline_reasoner and not stage_budget.exhausted_limits
+            )
+            active_reasoner = self._reasoner if use_model else self._baseline_reasoner
+            outputs = await asyncio.gather(
+                *(
+                    self._extract_with_deadline(
+                        state,
+                        question,
+                        paper_by_id[passage.paper_id],
+                        passage,
+                        active_reasoner,
+                        enforce_deadline=use_model,
                     )
+                    for passage in batch
                 )
             )
-        else:
-            reasoned_cards = []
-            stage_budget = _budget_with_elapsed(state)
-            for passage in passages:
-                active_reasoner = (
-                    self._baseline_reasoner if stage_budget.exhausted_limits else self._reasoner
-                )
-                output = await active_reasoner.extract_evidence(
-                    question,
-                    paper_by_id[passage.paper_id],
-                    passage,
-                )
-                reasoned_cards.append(output)
+            reasoned_cards.extend(outputs)
+            for output in outputs:
                 stage_budget = _record_output_usage(stage_budget, output, state)
         evidence = tuple(item.value for item in reasoned_cards if item.value is not None)
         return {
@@ -629,12 +644,15 @@ class ResearchWorkflow:
         question = ResearchRequest.model_validate(state["request"]).question
         papers = tuple(Paper.model_validate(item) for item in state.get("papers", []))
         evidence = tuple(EvidenceCard.model_validate(item) for item in state.get("evidence", []))
-        active_reasoner = (
-            self._baseline_reasoner
-            if _budget_with_elapsed(state).exhausted_limits
-            else self._reasoner
+        use_model = not _budget_with_elapsed(state).exhausted_limits
+        active_reasoner = self._reasoner if use_model else self._baseline_reasoner
+        reasoned = await self._call_with_deadline(
+            state,
+            "synthesize",
+            lambda: active_reasoner.synthesize(question, papers, evidence),
+            lambda: self._baseline_reasoner.synthesize(question, papers, evidence),
+            enforce_deadline=use_model,
         )
-        reasoned = await active_reasoner.synthesize(question, papers, evidence)
         report, claims = reasoned.value
         return {
             "report": report.model_dump(mode="json"),
@@ -655,24 +673,34 @@ class ResearchWorkflow:
         }
 
     async def _verify(self, state: ResearchState) -> dict[str, Any]:
+        request = ResearchRequest.model_validate(state["request"])
         claims = tuple(AtomicClaim.model_validate(item) for item in state.get("claims", []))
         evidence = tuple(EvidenceCard.model_validate(item) for item in state.get("evidence", []))
         passages = tuple(Passage.model_validate(item) for item in state.get("passages", []))
-        if self._reasoner is self._baseline_reasoner:
-            reasoned_results = list(
-                await asyncio.gather(
-                    *(self._reasoner.verify(claim, evidence, passages) for claim in claims)
+        reasoned_results: list[Reasoned[VerificationResult]] = []
+        stage_budget = _budget_with_elapsed(state)
+        concurrency = min(self._model_max_concurrency, request.max_workers)
+        for offset in range(0, len(claims), concurrency):
+            batch = claims[offset : offset + concurrency]
+            use_model = (
+                self._reasoner is not self._baseline_reasoner and not stage_budget.exhausted_limits
+            )
+            active_reasoner = self._reasoner if use_model else self._baseline_reasoner
+            outputs = await asyncio.gather(
+                *(
+                    self._verify_with_deadline(
+                        state,
+                        claim,
+                        evidence,
+                        passages,
+                        active_reasoner,
+                        enforce_deadline=use_model,
+                    )
+                    for claim in batch
                 )
             )
-        else:
-            reasoned_results = []
-            stage_budget = _budget_with_elapsed(state)
-            for claim in claims:
-                active_reasoner = (
-                    self._baseline_reasoner if stage_budget.exhausted_limits else self._reasoner
-                )
-                output = await active_reasoner.verify(claim, evidence, passages)
-                reasoned_results.append(output)
+            reasoned_results.extend(outputs)
+            for output in outputs:
                 stage_budget = _record_output_usage(stage_budget, output, state)
         results = tuple(item.value for item in reasoned_results)
         return {
@@ -680,6 +708,88 @@ class ResearchWorkflow:
             **_reasoned_updates(state, reasoned_results),
             "trace": _trace(state, "verify", f"Verified {len(results)} claims independently."),
         }
+
+    async def _extract_with_deadline(
+        self,
+        state: ResearchState,
+        question: str,
+        paper: Paper,
+        passage: Passage,
+        reasoner: ResearchReasoner,
+        *,
+        enforce_deadline: bool,
+    ) -> Reasoned[EvidenceCard | None]:
+        if not enforce_deadline:
+            return await reasoner.extract_evidence(question, paper, passage)
+        remaining_seconds = _remaining_seconds(state)
+        if remaining_seconds > 0:
+            try:
+                async with asyncio.timeout(remaining_seconds):
+                    return await reasoner.extract_evidence(question, paper, passage)
+            except TimeoutError:
+                pass
+        secondary = await self._baseline_reasoner.extract_evidence(question, paper, passage)
+        return Reasoned(
+            secondary.value,
+            secondary.model_invocations,
+            (*secondary.warnings, "extract_evidence exceeded the run deadline; fallback used."),
+        )
+
+    async def _verify_with_deadline(
+        self,
+        state: ResearchState,
+        claim: AtomicClaim,
+        evidence: tuple[EvidenceCard, ...],
+        passages: tuple[Passage, ...],
+        reasoner: ResearchReasoner,
+        *,
+        enforce_deadline: bool,
+    ) -> Reasoned[VerificationResult]:
+        if not enforce_deadline:
+            return await reasoner.verify(claim, evidence, passages)
+        remaining_seconds = _remaining_seconds(state)
+        if remaining_seconds > 0:
+            try:
+                async with asyncio.timeout(remaining_seconds):
+                    return await reasoner.verify(claim, evidence, passages)
+            except TimeoutError:
+                pass
+        secondary = await self._baseline_reasoner.verify(claim, evidence, passages)
+        return Reasoned(
+            secondary.value,
+            secondary.model_invocations,
+            (*secondary.warnings, "verify exceeded the run deadline; fallback used."),
+        )
+
+    async def _call_with_deadline(
+        self,
+        state: ResearchState,
+        stage: str,
+        primary: Callable[[], Awaitable[Reasoned[ReasonedValueT]]],
+        fallback: Callable[[], Awaitable[Reasoned[ReasonedValueT]]],
+        *,
+        enforce_deadline: bool,
+    ) -> Reasoned[ReasonedValueT]:
+        if not enforce_deadline:
+            return await primary()
+        remaining_seconds = _remaining_seconds(state)
+        if remaining_seconds <= 0:
+            secondary = await fallback()
+            return Reasoned(
+                secondary.value,
+                secondary.model_invocations,
+                (*secondary.warnings, f"{stage} skipped after the run deadline."),
+            )
+        try:
+            async with asyncio.timeout(remaining_seconds):
+                return await primary()
+        except TimeoutError:
+            secondary = await fallback()
+            return Reasoned(
+                secondary.value,
+                secondary.model_invocations,
+                (*secondary.warnings, f"{stage} exceeded the run deadline; fallback used."),
+            )
 
     async def _quality_gate(self, state: ResearchState) -> dict[str, Any]:
         results = [
@@ -840,6 +950,7 @@ def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow
         reasoner=reasoner,
         artifact_store=artifact_store,
         worker_timeout_seconds=current.worker_timeout_seconds,
+        model_max_concurrency=current.model_max_concurrency,
         checkpoint_dsn=(current.database_url if current.checkpoint_mode == "postgres" else None),
     )
 
@@ -919,6 +1030,11 @@ def _budget_with_elapsed(state: ResearchState) -> ResearchBudget:
         return budget
     elapsed_ms = max(budget.elapsed_ms, int((time.time() - started) * 1_000))
     return budget.record_usage(elapsed_ms=elapsed_ms)
+
+
+def _remaining_seconds(state: ResearchState) -> float:
+    budget = _budget_with_elapsed(state)
+    return max(0.0, budget.max_elapsed_seconds - budget.elapsed_ms / 1_000)
 
 
 def _record_output_usage(

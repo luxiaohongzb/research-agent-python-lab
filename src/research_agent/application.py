@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -45,6 +46,22 @@ TERMINAL_STATUSES = frozenset(
     {RunStatus.COMPLETED, RunStatus.NEEDS_REVIEW, RunStatus.FAILED, RunStatus.CANCELLED}
 )
 
+ACTIVE_STAGE_AFTER_NODE = {
+    "plan": "retrieval",
+    "search": "normalize",
+    "dispatch_workers": "research_workers",
+    "research_worker": "research_workers",
+    "collect_workers": "normalize",
+    "normalize": "extract_evidence",
+    "extract_evidence": "assess_coverage",
+    "assess_coverage": "synthesize",
+    "refine": "retrieval",
+    "synthesize": "split_claims",
+    "split_claims": "verify",
+    "verify": "quality_gate",
+    "quality_gate": "finalize",
+}
+
 
 class ReviewValidationError(ValueError):
     pass
@@ -62,6 +79,7 @@ class ResearchApplicationService:
         observability: RuntimeObservability | None = None,
         audit: AuditStore | None = None,
         quota: QuotaPolicy | None = None,
+        progress_heartbeat_seconds: float = 10.0,
     ) -> None:
         self._workflow = workflow
         self._store = store or InMemoryRunStore()
@@ -71,6 +89,7 @@ class ResearchApplicationService:
         self._observability = observability or RuntimeObservability()
         self._audit = audit or InMemoryAuditStore()
         self._quota = quota
+        self._progress_heartbeat_seconds = progress_heartbeat_seconds
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def run(
@@ -315,15 +334,46 @@ class ResearchApplicationService:
         await self._store.save(running)
         await self._events.publish(snapshot.run_id, "started", {"status": RunStatus.RUNNING.value})
         await self._observability.started()
+        run_started = time.monotonic()
+        stage_started = run_started
+        active_stage = "plan"
 
         async def progress(node: str, details: dict[str, object]) -> None:
+            nonlocal active_stage, stage_started
             if await self._cancellations.is_requested(snapshot.run_id):
                 raise RunCancellationRequested(snapshot.run_id)
+            next_stage = ACTIVE_STAGE_AFTER_NODE.get(node, node)
             await self._events.publish(
                 snapshot.run_id,
                 "progress",
-                {"node": node, **details},
+                {
+                    "node": node,
+                    "next_node": next_stage,
+                    "stage_status": "completed",
+                    **details,
+                },
             )
+            active_stage = next_stage
+            stage_started = time.monotonic()
+
+        async def publish_heartbeats() -> None:
+            while True:
+                await asyncio.sleep(self._progress_heartbeat_seconds)
+                now = time.monotonic()
+                await self._events.publish(
+                    snapshot.run_id,
+                    "heartbeat",
+                    {
+                        "node": active_stage,
+                        "elapsed_seconds": int(now - run_started),
+                        "stage_elapsed_seconds": int(now - stage_started),
+                    },
+                )
+
+        heartbeat = asyncio.create_task(
+            publish_heartbeats(),
+            name=f"research-heartbeat-{snapshot.run_id}",
+        )
 
         try:
             with self._observability.span(
@@ -387,6 +437,9 @@ class ResearchApplicationService:
                 "failed",
                 {"status": RunStatus.FAILED.value, "error_type": type(exc).__name__},
             )
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def _mark_cancelled(self, snapshot: RunSnapshot) -> RunSnapshot:
         latest = await self._store.get(snapshot.run_id)

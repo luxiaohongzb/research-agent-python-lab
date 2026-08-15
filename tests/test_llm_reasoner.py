@@ -1,10 +1,20 @@
+import asyncio
 import json
 from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage
 
-from research_agent.domain import ResearchRequest, RunStatus, VerificationStatus
+from research_agent.domain import (
+    AtomicClaim,
+    EvidenceCard,
+    Paper,
+    Passage,
+    ResearchRequest,
+    RunStatus,
+    VerificationResult,
+    VerificationStatus,
+)
 from research_agent.llm_reasoner import (
     EvidenceOutput,
     FallbackResearchReasoner,
@@ -15,6 +25,7 @@ from research_agent.llm_reasoner import (
 )
 from research_agent.prompts import PROMPT_VERSION
 from research_agent.providers import CompositePaperProvider, OfflinePaperProvider
+from research_agent.reasoner import DeterministicReasoner, Reasoned
 from research_agent.workflow import ResearchWorkflow
 
 
@@ -122,6 +133,47 @@ class ScriptedModel:
         )
 
 
+class ConcurrencyTrackingReasoner(DeterministicReasoner):
+    def __init__(self) -> None:
+        self.active_extract = 0
+        self.max_active_extract = 0
+        self.active_verify = 0
+        self.max_active_verify = 0
+
+    async def extract_evidence(
+        self, question: str, paper: Paper, passage: Passage
+    ) -> Reasoned[EvidenceCard | None]:
+        self.active_extract += 1
+        self.max_active_extract = max(self.max_active_extract, self.active_extract)
+        try:
+            await asyncio.sleep(0.02)
+            return await super().extract_evidence(question, paper, passage)
+        finally:
+            self.active_extract -= 1
+
+    async def verify(
+        self,
+        claim: AtomicClaim,
+        evidence: tuple[EvidenceCard, ...],
+        passages: tuple[Passage, ...],
+    ) -> Reasoned[VerificationResult]:
+        self.active_verify += 1
+        self.max_active_verify = max(self.max_active_verify, self.active_verify)
+        try:
+            await asyncio.sleep(0.02)
+            return await super().verify(claim, evidence, passages)
+        finally:
+            self.active_verify -= 1
+
+
+class SlowEvidenceReasoner(DeterministicReasoner):
+    async def extract_evidence(
+        self, question: str, paper: Paper, passage: Passage
+    ) -> Reasoned[EvidenceCard | None]:
+        await asyncio.sleep(2)
+        return await super().extract_evidence(question, paper, passage)
+
+
 @pytest.mark.asyncio
 async def test_json_mode_uses_deepseek_compatible_structured_output() -> None:
     model = ScriptedModel()
@@ -172,6 +224,52 @@ async def test_structured_reasoner_runs_end_to_end_and_records_model_calls() -> 
         sum(item.estimated_cost_usd or 0 for item in result.model_invocations)
     )
     assert all(item.status is VerificationStatus.SUPPORTED for item in result.verifications)
+
+
+@pytest.mark.asyncio
+async def test_model_evidence_and_verification_are_bounded_concurrent() -> None:
+    reasoner = ConcurrencyTrackingReasoner()
+    workflow = ResearchWorkflow(
+        provider=CompositePaperProvider((OfflinePaperProvider(),)),
+        reasoner=reasoner,
+        model_max_concurrency=3,
+    )
+
+    result = await workflow.run(
+        ResearchRequest(
+            question="Compare research agent evidence and verification approaches",
+            max_papers=3,
+            max_iterations=1,
+            max_workers=3,
+        )
+    )
+
+    assert result.evidence
+    assert 2 <= reasoner.max_active_extract <= 3
+    assert reasoner.max_active_verify >= 2
+
+
+@pytest.mark.asyncio
+async def test_model_stage_falls_back_at_the_global_run_deadline() -> None:
+    workflow = ResearchWorkflow(
+        provider=CompositePaperProvider((OfflinePaperProvider(),)),
+        reasoner=SlowEvidenceReasoner(),
+        model_max_concurrency=1,
+    )
+
+    started = asyncio.get_running_loop().time()
+    result = await workflow.run(
+        ResearchRequest(
+            question="How do agentic RAG and claim verification work together?",
+            max_papers=1,
+            max_iterations=1,
+            max_workers=1,
+            max_elapsed_seconds=1,
+        )
+    )
+
+    assert asyncio.get_running_loop().time() - started < 1.8
+    assert any("deadline" in warning for warning in result.warnings)
 
 
 @pytest.mark.asyncio

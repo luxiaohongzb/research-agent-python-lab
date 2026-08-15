@@ -61,6 +61,31 @@ async def test_idempotent_submit_returns_original_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_long_running_stage_publishes_heartbeat_events() -> None:
+    provider = PausingProvider()
+    service = ResearchApplicationService(
+        ResearchWorkflow(provider=CompositePaperProvider((provider,))),
+        progress_heartbeat_seconds=0.01,
+    )
+    try:
+        submitted = await service.submit(
+            ResearchRequest(question="How are long research stages observed?", max_iterations=1)
+        )
+        await asyncio.wait_for(provider.started.wait(), timeout=2)
+        await asyncio.sleep(0.04)
+
+        events = await service.event_history(submitted.run_id)
+
+        heartbeats = [item for item in events if item.event == "heartbeat"]
+        assert heartbeats
+        assert heartbeats[-1].details["node"] in {"retrieval", "research_workers"}
+        assert "stage_elapsed_seconds" in heartbeats[-1].details
+    finally:
+        await service.cancel(submitted.run_id)
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_idempotency_key_rejects_a_different_request() -> None:
     service = ResearchApplicationService(
         ResearchWorkflow(provider=CompositePaperProvider((PausingProvider(),)))

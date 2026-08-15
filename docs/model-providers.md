@@ -13,6 +13,8 @@ RESEARCH_AGENT_DEEPSEEK_MODEL=deepseek-v4-pro
 RESEARCH_AGENT_DEEPSEEK_BASE_URL=https://api.deepseek.com
 RESEARCH_AGENT_MODEL_TIMEOUT_SECONDS=120
 RESEARCH_AGENT_MODEL_MAX_RETRIES=3
+RESEARCH_AGENT_MODEL_MAX_CONCURRENCY=3
+RESEARCH_AGENT_PROGRESS_HEARTBEAT_SECONDS=10
 ```
 
 推荐模型：
@@ -21,6 +23,8 @@ RESEARCH_AGENT_MODEL_MAX_RETRIES=3
 - `deepseek-v4-flash`：优先响应速度和演示成本。
 
 DeepSeek 使用 OpenAI 兼容的 Chat Completions，不使用 OpenAI Responses API。结构化阶段采用 `response_format={"type":"json_object"}`，Prompt 会携带 Pydantic JSON Schema；返回值仍由 Pydantic 和领域语义规则二次校验。失败会有限重试，再回退确定性 Reasoner，并在 `model_invocations` 和 `warnings` 中留痕。
+
+证据提取和声明核验按 `RESEARCH_AGENT_MODEL_MAX_CONCURRENCY` 受控并发，默认最多 3 路；每个批次结束后统一扣减 Token/费用预算，因此最大预算漂移被限制在一个并发批次内。所有模型阶段同时受研究任务的 `max_elapsed_seconds` 全局截止时间约束，超时后使用确定性 fallback 完成可交付结果。异步任务每隔 `RESEARCH_AGENT_PROGRESS_HEARTBEAT_SECONDS` 秒发布当前阶段与阶段耗时，工作台据此显示后台仍在运行。
 
 启动或切换配置：
 

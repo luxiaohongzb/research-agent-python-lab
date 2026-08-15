@@ -131,6 +131,7 @@ def build_worker(
             otel_enabled=current.otel_enabled,
             service_name=f"{current.otel_service_name}-worker",
         ),
+        progress_heartbeat_seconds=current.progress_heartbeat_seconds,
     )
     lease = RedisExecutionLease(
         current.redis_url,

@@ -2,7 +2,7 @@
 
 一个证据优先、预算受控、可核验的 Python 智能科研助理。项目用于学习 Agent 工程、准备面试，也可以继续演进为生产系统。
 
-**v1.2 已可交付：** 打开 `http://127.0.0.1:8000/workbench` 使用 React 科研工作台，`/library` 管理论文入库，`/admin` 查看系统运营状态；支持 API Key/RBAC、租户隔离、配额、审计、分布式 Worker、失败死信流、MCP 科研工具以及 OpenAI/DeepSeek 模型接入。部署、安全配置与验收步骤见 [产品交付手册](docs/product-delivery.md)。
+**v1.3 已可交付：** 打开 `http://127.0.0.1:8000/workbench` 使用 React 科研工作台，`/library` 管理论文入库，`/admin` 查看系统运营状态；支持用户登录/RBAC、租户隔离、配额、审计、分布式 Worker、失败死信流、MCP 科研工具以及 OpenAI/DeepSeek 模型接入。真实模型链路采用受控并发、全局截止时间和阶段心跳，长任务不会再表现为无反馈等待。部署、安全配置与验收步骤见 [产品交付手册](docs/product-delivery.md)。
 
 它不是“让一个模型无限搜索并直接写报告”的 Demo，而是把研究过程拆成可测试的状态图：
 

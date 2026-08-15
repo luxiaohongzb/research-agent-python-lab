@@ -12,6 +12,7 @@ export interface ResearchRequest {
   max_iterations: number;
   max_workers: number;
   max_cost_usd: number;
+  max_elapsed_seconds?: number;
 }
 
 export interface Paper {
@@ -64,6 +65,7 @@ export interface ResearchResult {
 export interface RunSnapshot {
   run_id: string;
   status: RunStatus;
+  request?: ResearchRequest;
   created_at?: string;
   updated_at?: string;
   result?: ResearchResult | null;

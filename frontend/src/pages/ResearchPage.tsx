@@ -31,12 +31,58 @@ const eventLabels: Record<string, string> = {
   queued: "任务进入研究队列",
   started: "研究流程已经启动",
   progress: "研究阶段向前推进",
+  heartbeat: "当前阶段仍在运行",
   completed: "研究报告生成完成",
   failed: "研究执行遇到错误",
   cancelled: "研究任务已取消",
   resuming: "正在从检查点恢复",
   reviewed: "人工审核已记录",
 };
+
+const stageLabels: Record<string, string> = {
+  queued: "等待 Worker 接单",
+  plan: "规划研究问题",
+  retrieval: "检索与汇总文献",
+  search: "检索文献",
+  research_workers: "并行检索文献",
+  dispatch_workers: "调度研究员",
+  research_worker: "研究员检索",
+  collect_workers: "汇总检索结果",
+  normalize: "文献去重与规范化",
+  extract_evidence: "并行提取证据",
+  assess_coverage: "评估证据覆盖率",
+  refine: "补充检索",
+  synthesize: "综合研究报告",
+  split_claims: "拆分原子声明",
+  verify: "并行核验声明",
+  quality_gate: "执行质量门禁",
+  finalize: "保存研究结果",
+};
+
+const stageProgress: Record<string, number> = {
+  queued: 12,
+  plan: 15,
+  retrieval: 28,
+  search: 28,
+  research_workers: 32,
+  dispatch_workers: 25,
+  research_worker: 32,
+  collect_workers: 38,
+  normalize: 44,
+  extract_evidence: 62,
+  assess_coverage: 68,
+  refine: 36,
+  synthesize: 78,
+  split_claims: 82,
+  verify: 90,
+  quality_gate: 96,
+  finalize: 98,
+};
+
+function stageLabel(node: unknown): string {
+  const value = String(node ?? "starting");
+  return stageLabels[value] ?? value;
+}
 
 function statusLabel(status: RunStatus): string {
   return {
@@ -51,7 +97,13 @@ function statusLabel(status: RunStatus): string {
 
 function eventDetail(event: RunEvent): string {
   const details = event.details ?? {};
-  return String(details.node ?? details.status ?? details.error_type ?? "状态已经记录");
+  if (event.event === "heartbeat") {
+    return `${stageLabel(details.node)} · 阶段持续 ${Number(details.stage_elapsed_seconds ?? 0)}s`;
+  }
+  if (event.event === "progress" && details.node) {
+    return `${stageLabel(details.node)}已完成`;
+  }
+  return String(details.status ?? details.error_type ?? "状态已经记录");
 }
 
 export function ResearchPage(): React.JSX.Element {
@@ -76,7 +128,14 @@ export function ResearchPage(): React.JSX.Element {
     try {
       const next = await researchApi.get(runId);
       setSnapshot(next);
-      if (TERMINAL.has(next.status)) stopPolling();
+      if (TERMINAL.has(next.status)) {
+        stopPolling();
+        setElapsed(
+          next.result?.budget?.elapsed_ms
+            ? Math.round(next.result.budget.elapsed_ms / 1000)
+            : Math.max(0, Math.round((Date.now() - Date.parse(next.created_at ?? new Date().toISOString())) / 1000)),
+        );
+      }
     } catch (error) {
       stopPolling();
       notify(error instanceof Error ? error.message : "无法读取任务状态", "error");
@@ -85,16 +144,21 @@ export function ResearchPage(): React.JSX.Element {
 
   const beginTracking = (run: RunSnapshot): void => {
     setSnapshot(run);
+    setQuestion((current) => current || run.request?.question || "");
     sessionStorage.setItem(RUN_KEY, run.run_id);
-    startedAt.current = Date.now();
+    startedAt.current = run.created_at ? Date.parse(run.created_at) : Date.now();
+    setElapsed(Math.max(0, Math.floor((Date.now() - startedAt.current) / 1000)));
     stopPolling();
     poller.current = window.setInterval(() => void refresh(run.run_id), 1200);
     void researchApi.stream(run.run_id, (event) => {
       setEvents((current) => {
         const key = `${event.sequence ?? ""}:${event.event}:${eventDetail(event)}`;
-        return current.some((item) => `${item.sequence ?? ""}:${item.event}:${eventDetail(item)}` === key)
-          ? current
-          : [...current, event].slice(-12);
+        if (current.some((item) => `${item.sequence ?? ""}:${item.event}:${eventDetail(item)}` === key)) return current;
+        const last = current.at(-1);
+        if (event.event === "heartbeat" && last?.event === "heartbeat" && last.details?.node === event.details?.node) {
+          return [...current.slice(0, -1), event];
+        }
+        return [...current, event].slice(-12);
       });
     }).catch((error: unknown) => notify(error instanceof Error ? `实时事件：${error.message}` : "实时事件连接中断", "error"));
   };
@@ -164,10 +228,25 @@ export function ResearchPage(): React.JSX.Element {
     }
   }
 
+  const activeStage = useMemo(() => {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if ((event.event === "heartbeat" || event.event === "progress") && event.details?.node) {
+        return {
+          node: String(event.event === "progress" ? event.details.next_node ?? event.details.node : event.details.node),
+          stageElapsed: Number(event.details.stage_elapsed_seconds ?? 0),
+        };
+      }
+    }
+    return { node: snapshot?.status === "PENDING" ? "queued" : "plan", stageElapsed: elapsed };
+  }, [elapsed, events, snapshot?.status]);
+
   const progress = useMemo(() => {
     if (!snapshot) return 0;
-    return { PENDING: 12, RUNNING: Math.min(82, 34 + events.length * 5), COMPLETED: 100, NEEDS_REVIEW: 100, FAILED: 100, CANCELLED: 100 }[snapshot.status];
-  }, [snapshot, events.length]);
+    if (TERMINAL.has(snapshot.status)) return 100;
+    if (snapshot.status === "PENDING") return 12;
+    return stageProgress[activeStage.node] ?? 18;
+  }, [activeStage.node, snapshot]);
   const result = snapshot?.result;
   const supportedRate = result
     ? Math.round((result.verifications.filter((item) => item.status === "SUPPORTED").length / Math.max(1, result.verifications.length)) * 100)
@@ -248,7 +327,13 @@ export function ResearchPage(): React.JSX.Element {
                 <span>{TERMINAL.has(snapshot.status) ? snapshot.run_id.slice(0, 10) : `已运行 ${elapsed}s`}</span>
               </div>
               <div className="run-progress"><i style={{ width: `${progress}%` }} /></div>
-              <div className="run-question">{question || "正在恢复上一次研究任务"}</div>
+              <div className="run-question">{question || snapshot.request?.question || "正在恢复上一次研究任务"}</div>
+              {!TERMINAL.has(snapshot.status) && (
+                <div className="run-stage" aria-live="polite">
+                  <span className="stage-pulse" />
+                  <div><strong>{stageLabel(activeStage.node)}</strong><small>{activeStage.stageElapsed > 0 ? `阶段持续 ${activeStage.stageElapsed}s` : "阶段刚刚开始"} · 后台仍在工作</small></div>
+                </div>
+              )}
               <ol className="event-list" aria-live="polite">
                 {events.length === 0 && <li><i /><div><strong>正在连接执行轨迹</strong><span>任务 {snapshot.run_id.slice(0, 12)}</span></div></li>}
                 {events.map((item, index) => (

@@ -187,6 +187,7 @@ def create_app(
         observability=runtime_observability,
         audit=active_audit,
         quota=quota,
+        progress_heartbeat_seconds=settings.progress_heartbeat_seconds,
     )
 
     configured_secret = (
@@ -240,7 +241,7 @@ def create_app(
 
     api = FastAPI(
         title="Research Agent Python Lab",
-        version="1.2.0",
+        version="1.3.0",
         description="Evidence-first and claim-verifiable intelligent research assistant",
         lifespan=lifespan,
     )

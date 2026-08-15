@@ -81,6 +81,8 @@ class Settings(BaseSettings):
     )
     model_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
     model_max_retries: int = Field(default=3, ge=0, le=10)
+    model_max_concurrency: int = Field(default=3, ge=1, le=10)
+    progress_heartbeat_seconds: float = Field(default=10.0, gt=0, le=60)
     model_input_cost_per_million_usd: float | None = Field(default=None, ge=0)
     model_output_cost_per_million_usd: float | None = Field(default=None, ge=0)
 
