@@ -80,8 +80,48 @@ async def test_long_running_stage_publishes_heartbeat_events() -> None:
         assert heartbeats
         assert heartbeats[-1].details["node"] in {"retrieval", "research_workers"}
         assert "stage_elapsed_seconds" in heartbeats[-1].details
+        step_trace = heartbeats[-1].details["step_trace"]
+        assert step_trace["kind"] == "decision_summary"
+        assert step_trace["reason"]
+        assert step_trace["action"]
+        assert step_trace["observation"]
     finally:
         await service.cancel(submitted.run_id)
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_progress_events_publish_auditable_reason_act_observe_summaries() -> None:
+    provider = PausingProvider()
+    provider.pause = False
+    service = ResearchApplicationService(
+        ResearchWorkflow(provider=CompositePaperProvider((provider,)))
+    )
+    try:
+        submitted = await service.submit(
+            ResearchRequest(
+                question="How should research agents expose auditable execution steps?",
+                max_iterations=1,
+            )
+        )
+        await _wait_terminal(service, submitted.run_id)
+        events = await service.event_history(submitted.run_id)
+
+        progress = [item for item in events if item.event == "progress"]
+        assert progress
+        assert {item.details["node"] for item in progress} >= {
+            "plan",
+            "normalize",
+            "quality_gate",
+        }
+        for item in progress:
+            step_trace = item.details["step_trace"]
+            assert step_trace["kind"] == "decision_summary"
+            assert step_trace["reason"]
+            assert step_trace["action"]
+            assert step_trace["observation"]
+            assert isinstance(step_trace["metrics"], dict)
+    finally:
         await service.close()
 
 

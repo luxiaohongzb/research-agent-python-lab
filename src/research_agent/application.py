@@ -62,6 +62,134 @@ ACTIVE_STAGE_AFTER_NODE = {
     "quality_gate": "finalize",
 }
 
+STEP_NARRATIVES: dict[str, tuple[str, str]] = {
+    "plan": (
+        "开放式科研问题需要先拆成有边界、可检索且可独立核验的子问题。",
+        "调用 Planner 判断复杂度，生成子问题、检索式与纳入排除标准。",
+    ),
+    "retrieval": (
+        "研究计划已经形成，需要从允许的数据源收集可追溯材料。",
+        "按任务的数据源范围执行元数据、全文索引或 MCP 检索。",
+    ),
+    "dispatch_workers": (
+        "问题包含可并行的研究方向，并且当前 Worker 与工具预算允许并发执行。",
+        "Supervisor 为独立子问题派发有超时和论文上限的 Research Worker。",
+    ),
+    "research_workers": (
+        "多个子问题可以独立检索，以并行方式提高文献覆盖度。",
+        "Research Worker 正在执行受限检索并把结果写入 Artifact Store。",
+    ),
+    "research_worker": (
+        "当前子问题可在独立上下文中检索，失败不会中断其他研究分支。",
+        "执行单个 Research Worker 的多源检索并生成结果引用。",
+    ),
+    "collect_workers": (
+        "并行 Worker 的产物必须回到唯一归并点，避免共享状态冲突。",
+        "Supervisor 读取成功的 Artifact，隔离失败结果并合并候选论文与段落。",
+    ),
+    "search": (
+        "当前检索任务仍有查询和工具预算，需要收集与研究问题相关的来源。",
+        "调用所选公开论文、上传文档索引或 Zotero MCP 检索通道。",
+    ),
+    "normalize": (
+        "多来源检索可能返回重复或格式不一致的论文，必须先规范化再提取证据。",
+        "按 DOI 与规范化标题去重，融合排序并保留可追溯全文段落。",
+    ),
+    "extract_evidence": (
+        "报告中的结论必须绑定原始段落，而不能只依赖模型记忆或论文标题。",
+        "逐篇读取候选段落，提取带来源、局限与置信度的 Evidence Card。",
+    ),
+    "assess_coverage": (
+        "完成一轮证据提取后，需要判断来源覆盖是否足以停止继续搜索。",
+        "计算独立来源覆盖率，并结合轮次与预算决定补充检索或进入综合。",
+    ),
+    "refine": (
+        "证据覆盖仍有缺口且预算未耗尽，需要针对局限或冲突补充材料。",
+        "构造面向缺失、局限和冲突证据的下一轮有界检索任务。",
+    ),
+    "synthesize": (
+        "证据已达到停止条件，或预算要求流程开始收敛到可交付结果。",
+        "仅基于当前论文与 Evidence Card 综合报告并生成候选声明。",
+    ),
+    "split_claims": (
+        "报告中的复合结论无法被精确核验，需要拆成最小可验证单元。",
+        "检查并规范化 Atomic Claim，标记可能包含多个结论的句子。",
+    ),
+    "verify": (
+        "生成阶段可能引入不受证据支持的表述，因此必须独立复核每条声明。",
+        "将每个 Atomic Claim 与绑定段落逐条比对，输出支持状态与置信度。",
+    ),
+    "quality_gate": (
+        "交付前需要同时检查证据覆盖、声明冲突和运行预算，不能只看文本是否完整。",
+        "执行最终质量门禁，决定完成交付或标记为需要人工复核。",
+    ),
+    "finalize": (
+        "研究节点已经结束，需要持久化最终报告、预算和可审计轨迹。",
+        "保存运行快照并发布终态事件。",
+    ),
+}
+
+STEP_METRIC_KEYS = frozenset(
+    {
+        "blocked_claims",
+        "budget_limits",
+        "claim_count",
+        "complexity",
+        "compound_claim_count",
+        "coverage_score",
+        "decision",
+        "elapsed_ms",
+        "evidence_count",
+        "iteration",
+        "low_coverage",
+        "paper_count",
+        "passage_count",
+        "retrieval_errors",
+        "retrieval_lanes",
+        "search_task_count",
+        "source_scope",
+        "sources",
+        "status",
+        "sub_question",
+        "sub_question_count",
+        "successful_workers",
+        "unique_sources",
+        "verification_counts",
+        "worker_count",
+        "worker_status",
+    }
+)
+
+
+def _step_trace(
+    node: str,
+    details: dict[str, object],
+    *,
+    next_stage: str,
+    running: bool = False,
+) -> dict[str, object]:
+    reason, action = STEP_NARRATIVES.get(
+        node,
+        (
+            "研究工作流需要完成当前受控节点后才能继续。",
+            f"执行工作流节点 {node}。",
+        ),
+    )
+    trace_details = details.get("trace_details")
+    raw_metrics = trace_details if isinstance(trace_details, dict) else {}
+    metrics = {key: value for key, value in raw_metrics.items() if key in STEP_METRIC_KEYS}
+    observation = details.get("trace_message")
+    if not isinstance(observation, str) or not observation:
+        observation = "当前步骤仍在执行，等待可验证的节点输出。" if running else "步骤已完成。"
+    return {
+        "kind": "decision_summary",
+        "reason": reason,
+        "action": action,
+        "observation": observation,
+        "next_node": next_stage,
+        "metrics": metrics,
+    }
+
 
 class ReviewValidationError(ValueError):
     pass
@@ -343,6 +471,11 @@ class ResearchApplicationService:
             if await self._cancellations.is_requested(snapshot.run_id):
                 raise RunCancellationRequested(snapshot.run_id)
             next_stage = ACTIVE_STAGE_AFTER_NODE.get(node, node)
+            trace_details = details.get("trace_details")
+            if isinstance(trace_details, dict):
+                decision = trace_details.get("decision")
+                if decision in {"refine", "synthesize"}:
+                    next_stage = str(decision)
             await self._events.publish(
                 snapshot.run_id,
                 "progress",
@@ -350,6 +483,7 @@ class ResearchApplicationService:
                     "node": node,
                     "next_node": next_stage,
                     "stage_status": "completed",
+                    "step_trace": _step_trace(node, details, next_stage=next_stage),
                     **details,
                 },
             )
@@ -367,6 +501,12 @@ class ResearchApplicationService:
                         "node": active_stage,
                         "elapsed_seconds": int(now - run_started),
                         "stage_elapsed_seconds": int(now - stage_started),
+                        "step_trace": _step_trace(
+                            active_stage,
+                            {},
+                            next_stage=active_stage,
+                            running=True,
+                        ),
                     },
                 )
 

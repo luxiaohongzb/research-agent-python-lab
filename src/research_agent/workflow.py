@@ -269,9 +269,7 @@ class ResearchWorkflow:
                     final = payload
                 elif mode == "updates":
                     for node, update in payload.items():
-                        details = (
-                            {"updated_fields": sorted(update)} if isinstance(update, dict) else {}
-                        )
+                        details = _progress_update_details(str(node), update)
                         await progress(str(node), details)
             if final is None:
                 raise RuntimeError("research graph completed without a final state")
@@ -485,6 +483,8 @@ class ResearchWorkflow:
                         if item.artifact_ref is not None
                     ],
                     "payloads_in_graph_state": False,
+                    "worker_count": len(results),
+                    "successful_workers": successful_artifacts,
                 },
             ),
         }
@@ -506,7 +506,16 @@ class ResearchWorkflow:
             "plan": plan.model_dump(mode="json"),
             "pending_tasks": [task.model_dump(mode="json") for task in plan.search_tasks],
             **_reasoned_updates(state, (reasoned,)),
-            "trace": _trace(state, "plan", f"Created {len(plan.search_tasks)} search tasks."),
+            "trace": _trace(
+                state,
+                "plan",
+                f"Created {len(plan.search_tasks)} search tasks.",
+                {
+                    "complexity": plan.complexity.value,
+                    "search_task_count": len(plan.search_tasks),
+                    "sub_question_count": len(plan.sub_questions),
+                },
+            ),
         }
 
     async def _search(self, state: ResearchState) -> dict[str, Any]:
@@ -587,6 +596,10 @@ class ResearchWorkflow:
                 "normalize",
                 f"Retained {len(unique)} unique papers and "
                 f"{len(selected_passages)} full-text passages.",
+                {
+                    "paper_count": len(unique),
+                    "passage_count": len(selected_passages),
+                },
             ),
         }
 
@@ -641,7 +654,15 @@ class ResearchWorkflow:
             "passages": [passage.model_dump(mode="json") for passage in passages],
             "evidence": [card.model_dump(mode="json") for card in evidence],
             **_reasoned_updates(state, reasoned_cards),
-            "trace": _trace(state, "extract_evidence", f"Created {len(evidence)} evidence cards."),
+            "trace": _trace(
+                state,
+                "extract_evidence",
+                f"Created {len(evidence)} evidence cards.",
+                {
+                    "evidence_count": len(evidence),
+                    "passage_count": len(passages),
+                },
+            ),
         }
 
     async def _assess_coverage(self, state: ResearchState) -> dict[str, Any]:
@@ -654,12 +675,24 @@ class ResearchWorkflow:
                 state,
                 "assess_coverage",
                 f"Coverage score={score:.2f} from {unique_sources} unique sources.",
+                {
+                    "coverage_score": score,
+                    "unique_sources": unique_sources,
+                    "decision": self._coverage_decision(state, score),
+                },
             ),
         }
 
     def _route_after_coverage(self, state: ResearchState) -> Literal["refine", "synthesize"]:
+        return self._coverage_decision(state, state.get("coverage_score", 0))
+
+    def _coverage_decision(
+        self,
+        state: ResearchState,
+        coverage_score: float,
+    ) -> Literal["refine", "synthesize"]:
         budget = _budget_with_elapsed(state)
-        if state.get("coverage_score", 0) >= 0.66:
+        if coverage_score >= 0.66:
             return "synthesize"
         if (
             state.get("iteration", 1) >= budget.max_iterations
@@ -683,7 +716,12 @@ class ResearchWorkflow:
         return {
             "iteration": iteration,
             "pending_tasks": [task.model_dump(mode="json")],
-            "trace": _trace(state, "refine", f"Scheduled bounded refinement round {iteration}."),
+            "trace": _trace(
+                state,
+                "refine",
+                f"Scheduled bounded refinement round {iteration}.",
+                {"iteration": iteration, "purpose": task.purpose},
+            ),
         }
 
     async def _synthesize(self, state: ResearchState) -> dict[str, Any]:
@@ -704,7 +742,16 @@ class ResearchWorkflow:
             "report": report.model_dump(mode="json"),
             "claims": [claim.model_dump(mode="json") for claim in claims],
             **_reasoned_updates(state, (reasoned,)),
-            "trace": _trace(state, "synthesize", f"Drafted a report with {len(claims)} claims."),
+            "trace": _trace(
+                state,
+                "synthesize",
+                f"Drafted a report with {len(claims)} claims.",
+                {
+                    "claim_count": len(claims),
+                    "paper_count": len(papers),
+                    "evidence_count": len(evidence),
+                },
+            ),
         }
 
     async def _split_claims(self, state: ResearchState) -> dict[str, Any]:
@@ -715,7 +762,15 @@ class ResearchWorkflow:
             warnings.append(f"Potentially compound claims: {', '.join(non_atomic)}")
         return {
             "warnings": warnings,
-            "trace": _trace(state, "split_claims", f"Validated {len(claims)} atomic claims."),
+            "trace": _trace(
+                state,
+                "split_claims",
+                f"Validated {len(claims)} atomic claims.",
+                {
+                    "claim_count": len(claims),
+                    "compound_claim_count": len(non_atomic),
+                },
+            ),
         }
 
     async def _verify(self, state: ResearchState) -> dict[str, Any]:
@@ -749,10 +804,23 @@ class ResearchWorkflow:
             for output in outputs:
                 stage_budget = _record_output_usage(stage_budget, output, state)
         results = tuple(item.value for item in reasoned_results)
+        verification_counts: dict[str, int] = {}
+        for result in results:
+            verification_counts[result.status.value] = (
+                verification_counts.get(result.status.value, 0) + 1
+            )
         return {
             "verifications": [result.model_dump(mode="json") for result in results],
             **_reasoned_updates(state, reasoned_results),
-            "trace": _trace(state, "verify", f"Verified {len(results)} claims independently."),
+            "trace": _trace(
+                state,
+                "verify",
+                f"Verified {len(results)} claims independently.",
+                {
+                    "claim_count": len(results),
+                    "verification_counts": verification_counts,
+                },
+            ),
         }
 
     async def _extract_with_deadline(
@@ -865,6 +933,12 @@ class ResearchWorkflow:
                 "quality_gate",
                 f"Final status={status}; low_coverage={low_coverage}; "
                 f"budget_limits={budget.exhausted_limits}.",
+                {
+                    "status": status.value,
+                    "low_coverage": low_coverage,
+                    "blocked_claims": blocked,
+                    "budget_limits": budget.exhausted_limits,
+                },
             ),
         }
 
@@ -1016,6 +1090,35 @@ def _trace(
 ) -> list[dict[str, Any]]:
     event = TraceEvent(node=node, message=message, details=details or {})
     return [*state.get("trace", []), event.model_dump(mode="json")]
+
+
+def _progress_update_details(node: str, update: Any) -> dict[str, Any]:
+    if not isinstance(update, dict):
+        return {}
+    details: dict[str, Any] = {"updated_fields": sorted(update)}
+    trace_history = update.get("trace")
+    if isinstance(trace_history, list) and trace_history:
+        try:
+            latest = TraceEvent.model_validate(trace_history[-1])
+        except (TypeError, ValueError):
+            latest = None
+        if latest is not None and latest.node == node:
+            details["trace_message"] = latest.message
+            details["trace_details"] = latest.details
+    if node == "research_worker":
+        outputs = update.get("worker_outputs")
+        if isinstance(outputs, list) and outputs:
+            worker = ResearchWorkerResult.model_validate(outputs[-1])
+            details["trace_message"] = (
+                f"Worker {worker.worker_id} finished sub-question retrieval "
+                f"with status={worker.status.value}."
+            )
+            details["trace_details"] = {
+                "worker_status": worker.status.value,
+                "elapsed_ms": worker.elapsed_ms,
+                "sub_question": worker.sub_question,
+            }
+    return details
 
 
 def _to_result(state: ResearchState) -> ResearchResult:

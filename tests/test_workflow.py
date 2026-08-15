@@ -30,6 +30,11 @@ async def test_workflow_produces_traceable_supported_claims() -> None:
         "verify",
         "quality_gate",
     ]
+    coverage = next(event for event in result.trace if event.node == "assess_coverage")
+    assert coverage.details["coverage_score"] >= 0.66
+    assert coverage.details["decision"] == "synthesize"
+    quality_gate = result.trace[-1]
+    assert quality_gate.details["status"] == RunStatus.COMPLETED.value
 
 
 @pytest.mark.asyncio

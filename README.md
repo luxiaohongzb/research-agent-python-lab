@@ -34,6 +34,7 @@ Synthesize → Atomic Claims → Verify → Quality Gate
 - 模型、prompt 版本、延迟、token 和可配置费用估算
 - 确定性 reasoner，未配置模型也可以运行全部流程和测试
 - FastAPI 同步接口、异步任务接口和运行 Trace
+- 可审计 Reason–Act–Observe 实时轨迹：展示节点决策摘要、实际动作、观察结果、下一步与关键指标，不暴露模型私有思维链
 - PostgreSQL 运行快照与 LangGraph checkpoint，支持幂等提交、取消和断点恢复
 - 原生 SSE 进度流、Claim/Evidence 人工审阅记录、BibTeX/CSL JSON 导出
 - Prometheus 指标、运行质量摘要，以及可选 OpenTelemetry OTLP trace

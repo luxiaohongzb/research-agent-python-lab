@@ -20,6 +20,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { downloadExport, researchApi } from "../api";
 import { useApp } from "../app-context";
+import { ReasonActTrace } from "../components/ReasonActTrace";
 import type {
   ResearchRequest,
   ResearchSourceScope,
@@ -212,7 +213,7 @@ export function ResearchPage(): React.JSX.Element {
         if (event.event === "heartbeat" && last?.event === "heartbeat" && last.details?.node === event.details?.node) {
           return [...current.slice(0, -1), event];
         }
-        return [...current, event].slice(-12);
+        return [...current, event].slice(-60);
       });
     }).catch((error: unknown) => notify(error instanceof Error ? `实时事件：${error.message}` : "实时事件连接中断", "error"));
   };
@@ -455,6 +456,8 @@ export function ResearchPage(): React.JSX.Element {
           )}
         </aside>
       </div>
+
+      {snapshot && <ReasonActTrace events={events} status={snapshot.status} />}
 
       {result && (
         <section className="result-section">
