@@ -4,7 +4,14 @@ from uuid import uuid4
 import asyncpg
 import pytest
 
+from research_agent.auth import Role, TokenManager
 from research_agent.domain import ResearchRequest, RunSnapshot, RunStatus
+from research_agent.identity import (
+    CreateUserRequest,
+    IdentityService,
+    LoginRequest,
+    PostgresUserStore,
+)
 from research_agent.providers import CompositePaperProvider, OfflinePaperProvider
 from research_agent.run_store import PostgresRunStore
 from research_agent.workflow import ResearchWorkflow
@@ -76,3 +83,50 @@ async def test_langgraph_checkpoints_are_persisted_to_postgres() -> None:
 
     assert result.trace
     assert checkpoint_count > 0
+
+
+@pytest.mark.asyncio
+async def test_postgres_identity_persists_users_and_refresh_sessions() -> None:
+    dsn = _dsn()
+    tenant_id = f"identity-{uuid4().hex}"
+    email = f"admin-{uuid4().hex}@example.com"
+    tokens = TokenManager("postgres-identity-test-secret-with-at-least-32-bytes")
+    first_store = PostgresUserStore(dsn)
+    first_identity = IdentityService(first_store, tokens)
+    try:
+        user = await first_identity.create_user(
+            tenant_id=tenant_id,
+            request=CreateUserRequest(
+                email=email,
+                display_name="Persistent Administrator",
+                password="Persistent password 123!",
+                roles=frozenset({Role.ADMIN}),
+            ),
+            actor="system:test",
+        )
+        pair = await first_identity.login(
+            LoginRequest(
+                tenant_id=tenant_id,
+                email=email,
+                password="Persistent password 123!",
+            )
+        )
+    finally:
+        await first_identity.close()
+
+    second_store = PostgresUserStore(dsn)
+    second_identity = IdentityService(second_store, tokens)
+    try:
+        restored = await second_identity.get_user(user.user_id, tenant_id=tenant_id)
+        rotated = await second_identity.refresh(pair.refresh_token)
+    finally:
+        await second_identity.close()
+
+    connection = await asyncpg.connect(dsn)
+    try:
+        await connection.execute("DELETE FROM identity_users WHERE tenant_id = $1", tenant_id)
+    finally:
+        await connection.close()
+
+    assert restored.email == email
+    assert rotated.refresh_token != pair.refresh_token

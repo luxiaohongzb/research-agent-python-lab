@@ -122,3 +122,27 @@ export interface McpServerStatus {
   configured_tool_available: boolean;
   error_type?: string | null;
 }
+
+export type Role = "ADMIN" | "RESEARCHER" | "REVIEWER";
+
+export interface User {
+  user_id: string;
+  tenant_id: string;
+  email: string;
+  display_name: string;
+  roles: Role[];
+  permissions: string[];
+  is_active: boolean;
+  locked_until?: string | null;
+  last_login_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TokenPair {
+  access_token: string;
+  refresh_token: string;
+  token_type: "Bearer";
+  expires_in: number;
+  user: User;
+}

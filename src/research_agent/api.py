@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -29,8 +30,14 @@ from research_agent.application import (
     ReviewValidationError,
     RunNotFoundError,
 )
-from research_agent.audit import AuditEvent, AuditStore, PostgresAuditStore
-from research_agent.auth import Authenticator, Principal, Role, require_role
+from research_agent.audit import AuditEvent, AuditStore, InMemoryAuditStore, PostgresAuditStore
+from research_agent.auth import (
+    Authenticator,
+    Permission,
+    Principal,
+    TokenManager,
+    require_permission,
+)
 from research_agent.citations import render_bibtex, render_csl_json
 from research_agent.config import get_settings
 from research_agent.distributed import (
@@ -48,6 +55,27 @@ from research_agent.domain import (
 )
 from research_agent.events import InMemoryRunEventBroker, RedisRunEventBroker, RunEventBroker
 from research_agent.governance import QuotaExceededError, QuotaPolicy, TenantQuota
+from research_agent.identity import (
+    ChangePasswordRequest,
+    CreateUserRequest,
+    DuplicateUserError,
+    IdentityService,
+    InMemoryUserStore,
+    InvalidCredentialsError,
+    LoginRequest,
+    LogoutRequest,
+    PostgresUserStore,
+    RefreshRequest,
+    ResetPasswordRequest,
+    RoleView,
+    TokenPair,
+    UnsafeUserChangeError,
+    UpdateUserRequest,
+    UserNotFoundError,
+    UserStore,
+    UserView,
+    role_catalog,
+)
 from research_agent.ingestion import GrobidClient, GrobidError, TeiParser
 from research_agent.mcp_client import (
     McpServerStatus,
@@ -91,6 +119,8 @@ def create_app(
     cancellations: CancellationRegistry | None = None,
     observability: RuntimeObservability | None = None,
     audit_store: AuditStore | None = None,
+    user_store: UserStore | None = None,
+    identity_service: IdentityService | None = None,
     authenticator: Authenticator | None = None,
 ) -> FastAPI:
     settings = get_settings()
@@ -133,8 +163,12 @@ def create_app(
         service_name=settings.otel_service_name,
     )
     active_audit = audit_store
-    if active_audit is None and settings.run_store_mode == "postgres":
-        active_audit = PostgresAuditStore(settings.database_url)
+    if active_audit is None:
+        active_audit = (
+            PostgresAuditStore(settings.database_url)
+            if settings.run_store_mode == "postgres"
+            else InMemoryAuditStore()
+        )
     quota = QuotaPolicy(
         active_store,
         TenantQuota(
@@ -155,12 +189,53 @@ def create_app(
         quota=quota,
     )
 
+    configured_secret = (
+        settings.auth_token_secret.get_secret_value() if settings.auth_token_secret else None
+    )
+    if settings.auth_mode in {"rbac", "hybrid"} and not configured_secret:
+        raise RuntimeError(
+            "RBAC authentication requires RESEARCH_AGENT_AUTH_TOKEN_SECRET with at least 32 bytes"
+        )
+    tokens = TokenManager(
+        configured_secret or secrets.token_urlsafe(48),
+        issuer=settings.auth_issuer,
+        audience=settings.auth_audience,
+        access_ttl_seconds=settings.auth_access_token_seconds,
+    )
+    active_user_store = user_store
+    if active_user_store is None:
+        postgres_identity = settings.identity_store_mode == "postgres" or (
+            settings.identity_store_mode == "auto" and settings.run_store_mode == "postgres"
+        )
+        active_user_store = (
+            PostgresUserStore(settings.database_url) if postgres_identity else InMemoryUserStore()
+        )
+    identity = identity_service or IdentityService(
+        active_user_store,
+        tokens,
+        audit=active_audit,
+        refresh_ttl_seconds=settings.auth_refresh_token_seconds,
+        max_failed_attempts=settings.auth_max_failed_attempts,
+        lockout_seconds=settings.auth_lockout_seconds,
+    )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        await identity.initialize(
+            bootstrap_tenant_id=settings.bootstrap_admin_tenant_id,
+            bootstrap_email=settings.bootstrap_admin_email,
+            bootstrap_password=(
+                settings.bootstrap_admin_password.get_secret_value()
+                if settings.bootstrap_admin_password
+                else None
+            ),
+            bootstrap_display_name=settings.bootstrap_admin_display_name,
+        )
         await service.initialize()
         try:
             yield
         finally:
+            await identity.close()
             await service.close()
 
     api = FastAPI(
@@ -173,8 +248,11 @@ def create_app(
     active_auth = authenticator or Authenticator(
         mode=settings.auth_mode,
         api_keys_json=settings.api_keys_json,
+        token_manager=tokens,
+        principal_resolver=identity,
     )
     api.state.authenticator = active_auth
+    api.state.identity_service = identity
     api.mount("/metrics", make_asgi_app())
     static_dir = Path(__file__).with_name("static")
     api.mount("/assets", StaticFiles(directory=static_dir), name="assets")
@@ -187,6 +265,118 @@ def create_app(
         timeout_seconds=settings.grobid_timeout_seconds,
     )
     parser = tei_parser or TeiParser()
+
+    @api.post("/v1/auth/login", response_model=TokenPair)
+    async def login(request: LoginRequest) -> TokenPair:
+        try:
+            return await identity.login(request)
+        except InvalidCredentialsError as exc:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid email, password, or account state",
+                headers={"WWW-Authenticate": "Bearer"},
+            ) from exc
+
+    @api.post("/v1/auth/refresh", response_model=TokenPair)
+    async def refresh_access(request: RefreshRequest) -> TokenPair:
+        try:
+            return await identity.refresh(request.refresh_token)
+        except (InvalidCredentialsError, UserNotFoundError) as exc:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired refresh token",
+                headers={"WWW-Authenticate": "Bearer"},
+            ) from exc
+
+    @api.post("/v1/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+    async def logout(request: LogoutRequest) -> None:
+        try:
+            await identity.logout(request.refresh_token, actor="refresh-session")
+        except InvalidCredentialsError:
+            return None
+
+    @api.get("/v1/auth/me", response_model=UserView)
+    async def current_user(principal: PrincipalDependency) -> UserView:
+        return await identity.me(principal)
+
+    @api.post("/v1/auth/change-password", status_code=status.HTTP_204_NO_CONTENT)
+    async def change_password(
+        request: ChangePasswordRequest, principal: PrincipalDependency
+    ) -> None:
+        try:
+            await identity.change_password(principal, request)
+        except InvalidCredentialsError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except UnsafeUserChangeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.get("/v1/roles", response_model=list[RoleView])
+    async def list_roles(principal: PrincipalDependency) -> tuple[RoleView, ...]:
+        require_permission(principal, Permission.ROLES_READ)
+        return role_catalog()
+
+    @api.get("/v1/users", response_model=list[UserView])
+    async def list_users(
+        principal: PrincipalDependency,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> tuple[UserView, ...]:
+        require_permission(principal, Permission.USERS_READ)
+        return await identity.list_users(principal.tenant_id, limit=limit, offset=offset)
+
+    @api.post("/v1/users", response_model=UserView, status_code=status.HTTP_201_CREATED)
+    async def create_user(request: CreateUserRequest, principal: PrincipalDependency) -> UserView:
+        require_permission(principal, Permission.USERS_WRITE)
+        try:
+            return await identity.create_user(
+                tenant_id=principal.tenant_id,
+                request=request,
+                actor=principal.subject,
+            )
+        except DuplicateUserError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.get("/v1/users/{user_id}", response_model=UserView)
+    async def get_user(user_id: str, principal: PrincipalDependency) -> UserView:
+        require_permission(principal, Permission.USERS_READ)
+        try:
+            return await identity.get_user(user_id, tenant_id=principal.tenant_id)
+        except UserNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="User not found") from exc
+
+    @api.patch("/v1/users/{user_id}", response_model=UserView)
+    async def update_user(
+        user_id: str, request: UpdateUserRequest, principal: PrincipalDependency
+    ) -> UserView:
+        require_permission(principal, Permission.USERS_WRITE)
+        try:
+            return await identity.update_user(
+                user_id,
+                tenant_id=principal.tenant_id,
+                request=request,
+                actor=principal,
+            )
+        except UserNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="User not found") from exc
+        except UnsafeUserChangeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.post("/v1/users/{user_id}/reset-password", status_code=status.HTTP_204_NO_CONTENT)
+    async def reset_user_password(
+        user_id: str,
+        request: ResetPasswordRequest,
+        principal: PrincipalDependency,
+    ) -> None:
+        require_permission(principal, Permission.USERS_WRITE)
+        try:
+            await identity.reset_password(
+                user_id,
+                tenant_id=principal.tenant_id,
+                new_password=request.new_password,
+                actor=principal.subject,
+            )
+        except UserNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="User not found") from exc
 
     @api.get("/health")
     async def health() -> dict[str, str]:
@@ -217,7 +407,7 @@ def create_app(
     async def run_research(
         request: ResearchRequest, principal: PrincipalDependency
     ) -> ResearchResult:
-        require_role(principal, Role.RESEARCHER, Role.ADMIN)
+        require_permission(principal, Permission.RESEARCH_CREATE)
         try:
             return await service.run(
                 request,
@@ -240,7 +430,7 @@ def create_app(
             Header(alias="Idempotency-Key", min_length=1, max_length=200),
         ] = None,
     ) -> RunSnapshot:
-        require_role(principal, Role.RESEARCHER, Role.ADMIN)
+        require_permission(principal, Permission.RESEARCH_CREATE)
         try:
             return await service.submit(
                 request,
@@ -255,7 +445,7 @@ def create_app(
 
     @api.get("/v1/research/runs/{run_id}", response_model=RunSnapshot)
     async def get_research(run_id: str, principal: PrincipalDependency) -> RunSnapshot:
-        require_role(principal, Role.RESEARCHER, Role.REVIEWER, Role.ADMIN)
+        require_permission(principal, Permission.RESEARCH_READ)
         try:
             return await service.get(run_id, tenant_id=principal.tenant_id)
         except RunNotFoundError as exc:
@@ -263,7 +453,7 @@ def create_app(
 
     @api.delete("/v1/research/runs/{run_id}", response_model=RunSnapshot)
     async def cancel_research(run_id: str, principal: PrincipalDependency) -> RunSnapshot:
-        require_role(principal, Role.RESEARCHER, Role.ADMIN)
+        require_permission(principal, Permission.RESEARCH_CANCEL)
         try:
             return await service.cancel(
                 run_id, tenant_id=principal.tenant_id, actor=principal.subject
@@ -273,7 +463,7 @@ def create_app(
 
     @api.post("/v1/research/runs/{run_id}/resume", response_model=RunSnapshot)
     async def resume_research(run_id: str, principal: PrincipalDependency) -> RunSnapshot:
-        require_role(principal, Role.RESEARCHER, Role.ADMIN)
+        require_permission(principal, Permission.RESEARCH_CANCEL)
         try:
             return await service.resume(
                 run_id, tenant_id=principal.tenant_id, actor=principal.subject
@@ -290,7 +480,7 @@ def create_app(
         principal: PrincipalDependency,
         after_sequence: Annotated[int, Query(ge=0)] = 0,
     ) -> AsyncIterator[ServerSentEvent]:
-        require_role(principal, Role.RESEARCHER, Role.REVIEWER, Role.ADMIN)
+        require_permission(principal, Permission.RESEARCH_READ)
         try:
             await service.get(run_id, tenant_id=principal.tenant_id)
         except RunNotFoundError as exc:
@@ -312,7 +502,7 @@ def create_app(
     async def review_research(
         run_id: str, request: HumanReviewRequest, principal: PrincipalDependency
     ) -> RunSnapshot:
-        require_role(principal, Role.REVIEWER, Role.ADMIN)
+        require_permission(principal, Permission.RESEARCH_REVIEW)
         authoritative_request = request.model_copy(update={"reviewer": principal.subject})
         try:
             return await service.review(
@@ -328,7 +518,7 @@ def create_app(
 
     @api.get("/v1/research/runs/{run_id}/export/bibtex", response_class=PlainTextResponse)
     async def export_bibtex(run_id: str, principal: PrincipalDependency) -> PlainTextResponse:
-        require_role(principal, Role.RESEARCHER, Role.REVIEWER, Role.ADMIN)
+        require_permission(principal, Permission.RESEARCH_EXPORT)
         try:
             snapshot = await service.get(run_id, tenant_id=principal.tenant_id)
         except RunNotFoundError as exc:
@@ -342,7 +532,7 @@ def create_app(
 
     @api.get("/v1/research/runs/{run_id}/export/csl-json")
     async def export_csl(run_id: str, principal: PrincipalDependency) -> list[dict[str, object]]:
-        require_role(principal, Role.RESEARCHER, Role.REVIEWER, Role.ADMIN)
+        require_permission(principal, Permission.RESEARCH_EXPORT)
         try:
             snapshot = await service.get(run_id, tenant_id=principal.tenant_id)
         except RunNotFoundError as exc:
@@ -353,7 +543,7 @@ def create_app(
 
     @api.get("/v1/metrics/summary", response_model=RuntimeSummary)
     async def metrics_summary(principal: PrincipalDependency) -> RuntimeSummary:
-        require_role(principal, Role.ADMIN)
+        require_permission(principal, Permission.METRICS_READ)
         return await service.metrics_summary()
 
     @api.get("/v1/audit/events", response_model=list[AuditEvent])
@@ -361,7 +551,7 @@ def create_app(
         principal: PrincipalDependency,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> tuple[AuditEvent, ...]:
-        require_role(principal, Role.ADMIN)
+        require_permission(principal, Permission.AUDIT_READ)
         return await service.audit_events(principal.tenant_id, limit=limit)
 
     @api.get("/v1/operations/dead-letters", response_model=list[DeadLetter])
@@ -369,14 +559,14 @@ def create_app(
         principal: PrincipalDependency,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> tuple[DeadLetter, ...]:
-        require_role(principal, Role.ADMIN)
+        require_permission(principal, Permission.OPERATIONS_MANAGE)
         if active_queue is None:
             return ()
         return await active_queue.dead_letters(limit=limit)
 
     @api.get("/v1/integrations/mcp", response_model=list[McpServerStatus])
     async def mcp_integrations(principal: PrincipalDependency) -> tuple[McpServerStatus, ...]:
-        require_role(principal, Role.ADMIN)
+        require_permission(principal, Permission.INTEGRATIONS_READ)
         if not settings.mcp_enabled:
             return ()
         configs = parse_mcp_paper_servers(settings.mcp_paper_servers_json)
@@ -394,7 +584,7 @@ def create_app(
         principal: PrincipalDependency,
         file: Annotated[UploadFile, File()],
     ) -> IngestionResult:
-        require_role(principal, Role.RESEARCHER, Role.ADMIN)
+        require_permission(principal, Permission.CORPUS_WRITE)
         if file.content_type not in {"application/pdf", "application/x-pdf"}:
             raise HTTPException(status_code=415, detail="Only PDF documents are supported")
         pdf_bytes = await file.read(30 * 1024 * 1024 + 1)

@@ -23,8 +23,20 @@ class Settings(BaseSettings):
     dispatch_mode: Literal["local", "redis"] = "local"
     cancellation_mode: Literal["memory", "redis"] = "memory"
     artifact_store_mode: Literal["memory", "s3"] = "memory"
-    auth_mode: Literal["disabled", "api_key"] = "disabled"
+    auth_mode: Literal["disabled", "api_key", "rbac", "hybrid"] = "disabled"
     api_keys_json: str = "{}"
+    identity_store_mode: Literal["auto", "memory", "postgres"] = "auto"
+    auth_token_secret: SecretStr | None = None
+    auth_issuer: str = "research-agent"
+    auth_audience: str = "research-agent-api"
+    auth_access_token_seconds: int = Field(default=900, ge=60, le=86_400)
+    auth_refresh_token_seconds: int = Field(default=2_592_000, ge=300, le=31_536_000)
+    auth_max_failed_attempts: int = Field(default=5, ge=1, le=100)
+    auth_lockout_seconds: int = Field(default=900, ge=10, le=86_400)
+    bootstrap_admin_tenant_id: str | None = None
+    bootstrap_admin_email: str | None = None
+    bootstrap_admin_password: SecretStr | None = None
+    bootstrap_admin_display_name: str = "System Administrator"
     tenant_max_active_runs: int = Field(default=5, ge=1, le=1_000)
     tenant_max_workers: int = Field(default=5, ge=1, le=5)
     tenant_max_total_tokens: int = Field(default=1_000_000, ge=1_000, le=10_000_000)

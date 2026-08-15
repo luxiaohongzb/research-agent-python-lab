@@ -11,18 +11,20 @@ import {
   ScrollText,
   ServerCog,
   ShieldCheck,
+  UserPlus,
   Users,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { adminApi, ApiError } from "../api";
+import { adminApi, ApiError, usersApi } from "../api";
 import { useApp } from "../app-context";
-import type { AuditEvent, DeadLetter, McpServerStatus, RuntimeSummary } from "../types";
+import type { AuditEvent, DeadLetter, McpServerStatus, Role, RuntimeSummary, User } from "../types";
 
 interface AdminData {
   summary: RuntimeSummary;
   audit: AuditEvent[];
   deadLetters: DeadLetter[];
   mcp: McpServerStatus[];
+  users: User[];
 }
 
 const emptySummary: RuntimeSummary = {
@@ -40,23 +42,33 @@ const actionLabels: Record<string, string> = {
   "research.cancelled": "取消研究任务",
   "research.resumed": "恢复研究任务",
   "research.reviewed": "记录人工审核",
+  "identity.login_succeeded": "用户登录成功",
+  "identity.login_failed": "用户登录失败",
+  "identity.user_created": "创建用户",
+  "identity.user_updated": "更新用户",
+  "identity.password_changed": "用户修改密码",
+  "identity.password_reset": "管理员重置密码",
+  "identity.logout": "用户退出登录",
 };
 
 export function AdminPage(): React.JSX.Element {
   const { openAccessKey } = useApp();
-  const [data, setData] = useState<AdminData>({ summary: emptySummary, audit: [], deadLetters: [], mcp: [] });
+  const [data, setData] = useState<AdminData>({ summary: emptySummary, audit: [], deadLetters: [], mcp: [], users: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"audit" | "deadletters">("audit");
+  const [tab, setTab] = useState<"users" | "audit" | "deadletters">("users");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [newUser, setNewUser] = useState({ email: "", display_name: "", password: "", roles: ["RESEARCHER"] as Role[] });
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
     setError(null);
     try {
-      const [summary, audit, deadLetters, mcp] = await Promise.all([
-        adminApi.summary(), adminApi.audit(), adminApi.deadLetters(), adminApi.mcp(),
+      const [summary, audit, deadLetters, mcp, users] = await Promise.all([
+        adminApi.summary(), adminApi.audit(), adminApi.deadLetters(), adminApi.mcp(), usersApi.list(),
       ]);
-      setData({ summary, audit, deadLetters, mcp });
+      setData({ summary, audit, deadLetters, mcp, users });
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "无法读取管理数据";
       setError(message);
@@ -73,6 +85,44 @@ export function AdminPage(): React.JSX.Element {
     [data.summary.status_counts],
   );
   const healthyMcp = data.mcp.filter((server) => server.connected && server.configured_tool_available).length;
+
+  async function createUser(event: React.FormEvent): Promise<void> {
+    event.preventDefault();
+    setCreating(true);
+    try {
+      await usersApi.create(newUser);
+      setNewUser({ email: "", display_name: "", password: "", roles: ["RESEARCHER"] });
+      setCreateOpen(false);
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "创建用户失败");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function updateUser(user: User, patch: { roles?: Role[]; is_active?: boolean }): Promise<void> {
+    try {
+      const updated = await usersApi.update(user.user_id, patch);
+      setData((current) => ({ ...current, users: current.users.map((item) => item.user_id === updated.user_id ? updated : item) }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "更新用户失败");
+    }
+  }
+
+  function toggleRole(user: User, role: Role): void {
+    const roles = user.roles.includes(role)
+      ? user.roles.filter((item) => item !== role)
+      : [...user.roles, role];
+    if (roles.length > 0) void updateUser(user, { roles });
+  }
+
+  function toggleNewRole(role: Role): void {
+    const roles = newUser.roles.includes(role)
+      ? newUser.roles.filter((item) => item !== role)
+      : [...newUser.roles, role];
+    if (roles.length > 0) setNewUser({ ...newUser, roles });
+  }
 
   return (
     <div className="admin-page">
@@ -142,11 +192,28 @@ export function AdminPage(): React.JSX.Element {
       <section className="surface operations-panel">
         <div className="operations-head">
           <div className="operation-tabs" role="tablist" aria-label="运营日志视图">
+            <button className={tab === "users" ? "active" : ""} type="button" role="tab" onClick={() => setTab("users")}><Users size={16} />用户与权限 <span>{data.users.length}</span></button>
             <button className={tab === "audit" ? "active" : ""} type="button" role="tab" onClick={() => setTab("audit")}><ScrollText size={16} />审计日志 <span>{data.audit.length}</span></button>
             <button className={tab === "deadletters" ? "active" : ""} type="button" role="tab" onClick={() => setTab("deadletters")}><AlertTriangle size={16} />失败死信 <span>{data.deadLetters.length}</span></button>
           </div>
-          <span className="surface-meta">LATEST 50 EVENTS</span>
+          {tab === "users" ? <button className="button button-dark" type="button" onClick={() => setCreateOpen(true)}><UserPlus size={15} />新建用户</button> : <span className="surface-meta">LATEST 50 EVENTS</span>}
         </div>
+        {tab === "users" && (
+          data.users.length === 0 ? <div className="table-empty"><Users size={22} /><p>当前租户暂无数据库用户</p></div> :
+          <div className="admin-table user-admin-table">
+            <div className="admin-row admin-row-head"><span>用户</span><span>角色</span><span>最近登录</span><span>状态</span></div>
+            {data.users.map((user) => (
+              <article className="admin-row" key={user.user_id}>
+                <div><span className="event-icon"><Users size={16} /></span><span><strong>{user.display_name}</strong><small>{user.email}</small></span></div>
+                <div className="role-pills" aria-label={`修改 ${user.display_name} 的角色`}>
+                  {(["ADMIN", "RESEARCHER", "REVIEWER"] as Role[]).map((role) => <button className={user.roles.includes(role) ? "active" : ""} type="button" key={role} onClick={() => toggleRole(user, role)}>{role.slice(0, 3)}</button>)}
+                </div>
+                <time>{user.last_login_at ? new Date(user.last_login_at).toLocaleString("zh-CN") : "尚未登录"}</time>
+                <button className={`account-state ${user.is_active ? "active" : "disabled"}`} type="button" onClick={() => void updateUser(user, { is_active: !user.is_active })}>{user.is_active ? "已启用" : "已停用"}</button>
+              </article>
+            ))}
+          </div>
+        )}
         {tab === "audit" && (
           data.audit.length === 0 ? <div className="table-empty"><ScrollText size={22} /><p>暂无审计事件</p></div> :
           <div className="admin-table">
@@ -162,6 +229,22 @@ export function AdminPage(): React.JSX.Element {
           </div>
         )}
       </section>
+      {createOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setCreateOpen(false)}>
+          <section className="modal" role="dialog" aria-modal="true" aria-labelledby="create-user-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-head"><div className="modal-icon"><UserPlus size={20} /></div><button className="icon-button" type="button" aria-label="关闭" onClick={() => setCreateOpen(false)}>×</button></div>
+            <p className="eyebrow">TENANT IDENTITY</p><h2 id="create-user-title">创建租户用户</h2>
+            <p className="modal-description">新用户只能访问当前租户。临时密码首次通过安全渠道交付，登录后应立即修改。</p>
+            <form onSubmit={(event) => void createUser(event)}>
+              <label htmlFor="new-display-name">姓名</label><input id="new-display-name" value={newUser.display_name} onChange={(event) => setNewUser({ ...newUser, display_name: event.target.value })} required />
+              <label htmlFor="new-email">邮箱</label><input id="new-email" type="email" value={newUser.email} onChange={(event) => setNewUser({ ...newUser, email: event.target.value })} required />
+              <label htmlFor="new-password">临时密码</label><input id="new-password" type="password" minLength={12} value={newUser.password} onChange={(event) => setNewUser({ ...newUser, password: event.target.value })} required />
+              <label>角色</label><div className="role-pills role-pills-form">{(["ADMIN", "RESEARCHER", "REVIEWER"] as Role[]).map((role) => <button className={newUser.roles.includes(role) ? "active" : ""} type="button" key={role} onClick={() => toggleNewRole(role)}>{role}</button>)}</div>
+              <div className="modal-actions"><button className="button button-ghost" type="button" onClick={() => setCreateOpen(false)}>取消</button><button className="button button-dark" type="submit" disabled={creating}>{creating ? "正在创建" : "创建用户"}</button></div>
+            </form>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
