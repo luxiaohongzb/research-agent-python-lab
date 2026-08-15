@@ -5,10 +5,14 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  CircleCheck,
   Eye,
+  LoaderCircle,
   Radio,
   Search,
   ShieldCheck,
+  Sparkles,
+  Terminal,
   Wrench,
   XCircle,
 } from "lucide-react";
@@ -133,9 +137,11 @@ function readStep(event: RunEvent): StepTrace {
   return {
     reason: typeof raw.reason === "string" ? raw.reason : fallback.reason,
     action: typeof raw.action === "string" ? raw.action : fallback.action,
-    observation: typeof raw.observation === "string"
-      ? raw.observation
-      : event.event === "heartbeat" ? "当前步骤仍在执行。" : "步骤已完成。",
+    observation: localizeObservation(
+      typeof raw.observation === "string"
+        ? raw.observation
+        : event.event === "heartbeat" ? "当前步骤仍在执行。" : "步骤已完成。",
+    ),
     nextNode: String(raw.next_node ?? details.next_node ?? node),
     metrics: asRecord(raw.metrics),
   };
@@ -168,9 +174,43 @@ function metricValue(key: string, value: unknown): string {
   return String(value);
 }
 
+function localizeObservation(value: string): string {
+  const rules: Array<[RegExp, (...parts: string[]) => string]> = [
+    [/^Created (\d+) search tasks\.$/, (count) => `已生成 ${count} 个可执行检索任务。`],
+    [/^Supervisor dispatched (\d+) bounded research workers\.$/, (count) => `已调度 ${count} 个受预算约束的研究 Worker。`],
+    [/^Worker (.+) finished sub-question retrieval with status=(.+)\.$/, (worker, state) => `${worker} 已完成子问题检索 · ${state}`],
+    [/^Supervisor merged (\d+)\/(\d+) worker artifacts\.$/, (done, total) => `已汇总 ${done}/${total} 个 Worker 检索产物。`],
+    [/^Retained (\d+) unique papers and (\d+) full-text passages\.$/, (papers, passages) => `去重后保留 ${papers} 篇论文与 ${passages} 个全文段落。`],
+    [/^Created (\d+) evidence cards\.$/, (count) => `已生成 ${count} 张可追溯证据卡。`],
+    [/^Coverage score=([\d.]+); (\d+)\/(\d+) sub-questions covered\.$/, (score, done, total) => `证据覆盖率 ${Math.round(Number(score) * 100)}% · 已覆盖 ${done}/${total} 个子问题。`],
+    [/^Drafted a report with (\d+) claims\.$/, (count) => `已综合生成报告草稿与 ${count} 条候选声明。`],
+    [/^Validated (\d+) atomic claims\.$/, (count) => `已拆分并校验 ${count} 条原子声明。`],
+    [/^Verified (\d+) claims independently\.$/, (count) => `已独立核验 ${count} 条声明。`],
+    [/^Final status=(.+); low_coverage=(.+); budget_limits=(.+)\.$/, (state, lowCoverage, limits) => `质量门禁完成 · ${state} · 低覆盖=${lowCoverage} · 预算限制=${limits}`],
+  ];
+  for (const [pattern, render] of rules) {
+    const match = value.match(pattern);
+    if (match) return render(...match.slice(1));
+  }
+  return value;
+}
+
+function localizeDecisionReason(value: unknown): string {
+  const reason = String(value ?? "无诊断信息");
+  if (reason === "selected by relevance-gated Top-K") return "通过相关性门槛并进入 Top-K。";
+  if (reason === "relevant candidate ranked below Top-K") return "已通过相关性门槛，但综合排名位于 Top-K 之外。";
+  const rejected = reason.match(/^rejected: only (\d+)\/(\d+) required query terms matched$/);
+  if (rejected) return `相关词仅命中 ${rejected[1]}/${rejected[2]}，未达到准入门槛。`;
+  if (reason === "rejected: no query terms in title and no searchable abstract") {
+    return "标题未命中查询词，且没有可检索摘要。";
+  }
+  return reason;
+}
+
 export function ReasonActTrace({ events, status }: { events: RunEvent[]; status: RunStatus }): React.JSX.Element {
   const [expanded, setExpanded] = useState(true);
   const [followLive, setFollowLive] = useState(true);
+  const [openSteps, setOpenSteps] = useState<Set<string>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
   const steps = useMemo(() => {
     const completed = events.filter((event) => event.event === "progress");
@@ -186,10 +226,19 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
   const modelPhase = String(modelDetails.phase ?? "delta");
   const modelPreview = typeof modelDetails.preview === "string" ? modelDetails.preview : "";
   const modelRunning = modelPhase === "started" || modelPhase === "delta";
+  const activeStep = steps.at(-1);
+  const activeNode = String(activeStep?.details?.node ?? "plan");
+  const isRunning = !TERMINAL.has(status);
   useEffect(() => {
     if (!expanded || !followLive || !scrollRef.current) return;
     scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [events, expanded, followLive]);
+
+  useEffect(() => {
+    if (!activeStep || TERMINAL.has(status)) return;
+    const key = `${activeStep.sequence ?? steps.length - 1}-${activeStep.event}`;
+    setOpenSteps((current) => new Set(current).add(key));
+  }, [activeStep, status, steps.length]);
 
   function handleScroll(): void {
     const element = scrollRef.current;
@@ -197,15 +246,30 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
     setFollowLive(element.scrollHeight - element.scrollTop - element.clientHeight < 48);
   }
 
+  function toggleStep(key: string): void {
+    setOpenSteps((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
   return (
-    <section className="surface reason-act-trace">
+    <section className="surface reason-act-trace deep-trace-shell">
       <div className="reason-act-head">
         <div className="reason-act-title">
-          <span><BrainCircuit size={18} /></span>
-          <div><small>03 · AUDITABLE AGENT TRACE</small><h3>深度研究轨迹</h3></div>
+          <span className={isRunning ? "trace-orb trace-orb-live" : "trace-orb"}><Sparkles size={18} /></span>
+          <div>
+            <small>03 · DEEP RESEARCH PROCESS</small>
+            <h3>{isRunning ? `正在${stageLabel(activeNode)}` : `已完成 ${steps.length} 个研究步骤`}</h3>
+            <p>{isRunning ? "依据真实工具结果持续推进" : "完整执行记录可展开复查"}</p>
+          </div>
         </div>
         <div className="reason-act-head-actions">
-          <span>{steps.length} STEPS</span>
+          <span className={isRunning ? "trace-status trace-status-live" : "trace-status"}>
+            <i />{isRunning ? "深度研究中" : status === "COMPLETED" ? "研究完成" : "流程已停止"}
+          </span>
           <button
             className={followLive ? "follow-live active" : "follow-live"}
             type="button"
@@ -223,13 +287,13 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
         <div className="reason-act-body">
           <div className="trace-disclosure">
             <ShieldCheck size={15} />
-            <p><strong>过程透明说明</strong>这里展示的是由真实节点输入、工具动作和输出生成的决策摘要，不展示模型私有思维链。</p>
+            <p><strong>可审计推演</strong>显示真实查询、工具动作、Top-K 筛选与节点观察；决策文字是结构化摘要，不是模型私有思维链。</p>
           </div>
           <div className="reason-act-scroll" ref={scrollRef} onScroll={handleScroll}>
-          {!TERMINAL.has(status) && latestModelStream && (
+          {latestModelStream && (
             <section className={`model-stream-panel ${modelRunning ? "model-stream-panel-live" : ""}`}>
               <header>
-                <div><Radio size={14} /><strong>MODEL STREAM · {String(modelDetails.provider ?? "MODEL").toUpperCase()}</strong></div>
+                <div><Terminal size={14} /><strong>LIVE MODEL OUTPUT · {String(modelDetails.provider ?? "MODEL").toUpperCase()}</strong></div>
                 <span>{modelRunning ? "STREAMING" : modelPhase === "completed" ? "SCHEMA VALIDATED" : "RETRYING"}</span>
               </header>
               <div className="model-stream-meta">
@@ -238,7 +302,7 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
                 <span>{Number(modelDetails.accumulated_chars ?? modelPreview.length)} CHARS</span>
               </div>
               <pre>{modelPreview || "正在建立安全流式连接……"}<i aria-hidden="true" /></pre>
-              <p>实时展示模型最终结构化输出；完整内容聚合后再执行 Schema 与领域校验，不包含私有思维链。</p>
+              <p><Radio size={10} /> 实时输出最终结构化内容，聚合后继续进行 Schema 与证据校验。</p>
             </section>
           )}
           {steps.length === 0 ? (
@@ -259,19 +323,27 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
                 const decisions = Array.isArray(traceDetails.retrieval_decisions)
                   ? traceDetails.retrieval_decisions.map(asRecord)
                   : [];
+                const stepKey = `${event.sequence ?? index}-${event.event}`;
+                const isOpen = openSteps.has(stepKey) || running;
                 return (
-                  <article className={`reason-act-step ${running ? "reason-act-step-live" : ""}`} key={`${event.sequence ?? index}-${event.event}`}>
-                    <div className="trace-step-rail"><span>{String(index + 1).padStart(2, "0")}</span><i /></div>
+                  <article className={`reason-act-step ${running ? "reason-act-step-live" : ""} ${isOpen ? "reason-act-step-open" : ""}`} key={stepKey}>
+                    <div className="trace-step-rail">
+                      <span>{running ? <LoaderCircle size={14} /> : <CircleCheck size={14} />}</span><i />
+                    </div>
                     <div className="trace-step-content">
-                      <header>
-                        <div><strong>{stageLabel(node)}</strong>{running && <span className="live-tag"><i /> LIVE</span>}</div>
-                        <time>{eventTime(event)}</time>
-                      </header>
-                      <div className="reason-act-grid">
-                        <section className="trace-reason"><span><BrainCircuit size={14} /> REASON · 决策依据</span><p>{step.reason}</p></section>
-                        <section className="trace-action"><span><Wrench size={14} /> ACT · 执行动作</span><p>{step.action}</p></section>
-                        <section className="trace-observe"><span><Eye size={14} /> OBSERVE · 节点观察</span><p>{step.observation}</p></section>
-                      </div>
+                      <button className="trace-step-summary" type="button" onClick={() => toggleStep(stepKey)} aria-expanded={isOpen}>
+                        <span className="trace-step-copy">
+                          <span><strong>{stageLabel(node)}</strong>{running && <span className="live-tag"><i /> LIVE</span>}</span>
+                          <small>{step.observation}</small>
+                        </span>
+                        <span className="trace-step-meta"><time>{eventTime(event)}</time>{isOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}</span>
+                      </button>
+                      {isOpen && <div className="trace-step-detail">
+                        <div className="reason-act-grid">
+                          <section className="trace-reason"><span><BrainCircuit size={14} /> 判断依据</span><p>{step.reason}</p></section>
+                          <section className="trace-action"><span><Wrench size={14} /> 执行动作</span><p>{step.action}</p></section>
+                          <section className="trace-observe"><span><Eye size={14} /> 观察结果</span><p>{step.observation}</p></section>
+                        </div>
                       {(retrievalQueries.length > 0 || decisions.length > 0) && (
                         <section className="retrieval-audit">
                           <header><Search size={14} /><strong>RETRIEVAL AUDIT · 真实检索与 Top-K 筛选</strong></header>
@@ -293,7 +365,7 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
                                         {` · relevance ${Number(decision.relevance_score ?? 0).toFixed(3)}`}
                                         {` · ${String(decision.source ?? "unknown")}`}
                                       </small>
-                                      <p>{String(decision.reason ?? "无诊断信息")}</p>
+                                      <p>{localizeDecisionReason(decision.reason)}</p>
                                     </div>
                                   </article>
                                 );
@@ -308,6 +380,7 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
                           <span className="trace-metric" key={key}>{metricLabels[key] ?? key} · {metricValue(key, value)}</span>
                         ))}
                       </footer>
+                      </div>}
                     </div>
                   </article>
                 );
