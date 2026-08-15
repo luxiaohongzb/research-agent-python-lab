@@ -50,6 +50,7 @@ dev = [
 [project.scripts]
 research-agent = "research_agent.cli:main"
 research-agent-eval = "research_agent.eval_cli:main"
+research-agent-retrieval-bench = "research_agent.retrieval_bench_cli:main"
 research-agent-server = "research_agent.server:main"
 research-agent-worker = "research_agent.worker:main"
 

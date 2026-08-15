@@ -31,6 +31,40 @@ WORKERS = Counter(
     "Research workers by terminal status.",
     ("status",),
 )
+STAGE_DURATION = Histogram(
+    "research_agent_stage_duration_seconds",
+    "Research workflow stage duration.",
+    ("stage", "status"),
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120),
+)
+MODEL_FIRST_TOKEN = Histogram(
+    "research_agent_model_first_token_seconds",
+    "Time from model invocation start to first streamed token.",
+    ("stage",),
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60),
+)
+MODEL_DURATION = Histogram(
+    "research_agent_model_duration_seconds",
+    "Total streamed model invocation duration.",
+    ("stage", "status"),
+    buckets=(0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300),
+)
+PROVIDER_ATTEMPTS = Counter(
+    "research_agent_provider_attempts_total",
+    "Provider attempts by operation and outcome.",
+    ("provider", "operation", "outcome"),
+)
+PROVIDER_RETRIES = Counter(
+    "research_agent_provider_retries_total",
+    "Provider retries scheduled after transient failures.",
+    ("provider", "operation"),
+)
+PROVIDER_ATTEMPT_DURATION = Histogram(
+    "research_agent_provider_attempt_duration_seconds",
+    "Duration of each provider attempt.",
+    ("provider", "operation", "outcome"),
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60),
+)
 
 
 class RuntimeSummary(BaseModel):
@@ -112,6 +146,42 @@ class RuntimeObservability:
             AbstractContextManager[Any],
             self._tracer.start_as_current_span(name, attributes=attributes),
         )
+
+    def stage_finished(
+        self,
+        stage: str,
+        duration_seconds: float,
+        *,
+        status: str = "success",
+    ) -> None:
+        STAGE_DURATION.labels(stage=stage, status=status).observe(max(0.0, duration_seconds))
+
+    def model_first_token(self, stage: str, duration_seconds: float) -> None:
+        MODEL_FIRST_TOKEN.labels(stage=stage).observe(max(0.0, duration_seconds))
+
+    def model_finished(self, stage: str, duration_seconds: float, *, status: str) -> None:
+        MODEL_DURATION.labels(stage=stage, status=status).observe(max(0.0, duration_seconds))
+
+
+def observe_provider_attempt(
+    provider: str,
+    operation: str,
+    attempt: int,
+    duration_seconds: float,
+    outcome: str,
+    retrying: bool,
+) -> None:
+    """Record provider telemetry without placing query or document content in labels."""
+
+    del attempt
+    PROVIDER_ATTEMPTS.labels(provider=provider, operation=operation, outcome=outcome).inc()
+    PROVIDER_ATTEMPT_DURATION.labels(
+        provider=provider,
+        operation=operation,
+        outcome=outcome,
+    ).observe(max(0.0, duration_seconds))
+    if retrying:
+        PROVIDER_RETRIES.labels(provider=provider, operation=operation).inc()
 
 
 def _configure_tracer(service_name: str) -> Any:

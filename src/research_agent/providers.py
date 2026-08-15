@@ -10,21 +10,41 @@ import httpx
 from pydantic import HttpUrl
 
 from research_agent.domain import Paper, SearchTask, SourceScope
+from research_agent.observability import observe_provider_attempt
+from research_agent.resilience import RetryPolicy, retry_async
 
 _SEARCH_STOPWORDS = frozenset(
     {
+        "a",
+        "an",
         "and",
+        "are",
+        "as",
+        "at",
+        "by",
         "conflicting",
         "does",
         "evidence",
+        "exist",
         "for",
+        "from",
         "how",
         "improve",
+        "in",
+        "is",
+        "it",
         "limitations",
+        "main",
+        "of",
+        "on",
+        "or",
         "question",
         "research",
+        "supports",
         "the",
+        "to",
         "what",
+        "with",
     }
 )
 
@@ -72,6 +92,50 @@ class PaperProvider(Protocol):
     name: str
 
     async def search(self, task: SearchTask, limit: int) -> list[Paper]: ...
+
+
+class ResilientProvider:
+    """Retry transient failures for idempotent metadata and citation graph calls."""
+
+    def __init__(self, provider: Any, *, policy: RetryPolicy) -> None:
+        self._provider = provider
+        self._policy = policy
+        self.name = str(provider.name)
+
+    async def search(self, task: SearchTask, limit: int) -> list[Paper]:
+        return await retry_async(
+            lambda: self._provider.search(task, limit),
+            policy=self._policy,
+            observer=self._observer("search"),
+        )
+
+    async def expand(self, seed: Paper, limit: int) -> list[Paper]:
+        expand = getattr(self._provider, "expand", None)
+        if not callable(expand):
+            raise TypeError(f"provider {self.name} does not support citation expansion")
+        return await retry_async(
+            lambda: expand(seed, limit),
+            policy=self._policy,
+            observer=self._observer("expand"),
+        )
+
+    def _observer(self, operation: str) -> Any:
+        def observe(
+            attempt: int,
+            duration_seconds: float,
+            outcome: str,
+            retrying: bool,
+        ) -> None:
+            observe_provider_attempt(
+                self.name,
+                operation,
+                attempt,
+                duration_seconds,
+                outcome,
+                retrying,
+            )
+
+        return observe
 
 
 @dataclass(frozen=True)

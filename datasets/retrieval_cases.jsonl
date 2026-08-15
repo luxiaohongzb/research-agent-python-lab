@@ -1,0 +1,8 @@
+{"case_id":"en-agentic-rag","query":"bounded agentic retrieval loops for scientific synthesis","relevant_paper_ids":["paper-agentic-rag"]}
+{"case_id":"en-citation-verification","query":"atomic claim citation verification against source passages","relevant_paper_ids":["paper-claim-verification"]}
+{"case_id":"en-budget-agents","query":"budget aware parallel research workers and complexity routing","relevant_paper_ids":["paper-budget-agents"]}
+{"case_id":"en-evidence-cards","query":"provenance evidence cards with extraction metadata and limitations","relevant_paper_ids":["paper-evidence-cards"]}
+{"case_id":"zh-agentic-rag","query":"科研综述中的智能体检索与有界循环","relevant_paper_ids":["paper-agentic-rag"]}
+{"case_id":"zh-verification","query":"原子声明如何绑定来源段落并核验冲突","relevant_paper_ids":["paper-claim-verification"]}
+{"case_id":"zh-budget-agents","query":"预算感知多智能体与并行研究者","relevant_paper_ids":["paper-budget-agents"]}
+{"case_id":"zh-evidence-cards","query":"证据卡片如何保存论文身份和研究局限","relevant_paper_ids":["paper-evidence-cards"]}

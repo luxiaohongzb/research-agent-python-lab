@@ -61,8 +61,8 @@ async def test_deep_research_api_exposes_bounded_worker_results() -> None:
 
     assert response.status_code == 200
     payload = response.json()
-    assert len(payload["workers"]) == 2
-    assert payload["budget"]["used_workers"] == 2
+    assert len(payload["workers"]) == 3
+    assert payload["budget"]["used_workers"] == 3
     assert all(item["artifact_ref"]["artifact_id"] for item in payload["workers"])
 
 

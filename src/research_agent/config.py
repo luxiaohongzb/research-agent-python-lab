@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     otel_enabled: bool = False
     otel_service_name: str = "research-agent-python-lab"
     request_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
+    provider_max_attempts: int = Field(default=3, ge=1, le=10)
+    provider_initial_backoff_seconds: float = Field(default=0.25, ge=0, le=30)
+    provider_max_backoff_seconds: float = Field(default=4.0, ge=0, le=120)
     default_max_papers: int = Field(default=8, ge=1, le=50)
     default_max_iterations: int = Field(default=2, ge=1, le=5)
     model: str = "gpt-5-mini"

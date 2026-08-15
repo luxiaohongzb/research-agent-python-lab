@@ -29,6 +29,31 @@ class PublicFixtureProvider:
         ][:limit]
 
 
+class MixedRelevanceProvider:
+    name = "openalex"
+
+    async def search(self, task: SearchTask, limit: int) -> list[Paper]:
+        return [
+            Paper(
+                paper_id="relevant-rag",
+                title="Evaluating Agentic RAG Reliability",
+                abstract=(
+                    "Agentic retrieval augmented generation is compared with "
+                    "traditional RAG evaluation."
+                ),
+                source=self.name,
+                score=1,
+            ),
+            Paper(
+                paper_id="unrelated-radar",
+                title="A Software Defined Radar Platform",
+                abstract="Radio frequency hardware and antenna measurements are reported.",
+                source=self.name,
+                score=0.9,
+            ),
+        ][:limit]
+
+
 def test_rrf_rewards_items_found_by_multiple_lanes() -> None:
     result = reciprocal_rank_fusion(
         {
@@ -82,3 +107,23 @@ async def test_retriever_keeps_public_and_private_scopes_separate() -> None:
         "openalex",
         document.paper.source,
     }
+
+
+@pytest.mark.asyncio
+async def test_retriever_rejects_unrelated_candidates_before_top_k() -> None:
+    retriever = ResearchRetriever(
+        metadata=CompositePaperProvider((MixedRelevanceProvider(),)),
+    )
+    task = SearchTask(
+        sub_question="Compare Agentic RAG and traditional RAG reliability",
+        query="agentic RAG traditional RAG reliability evaluation",
+        purpose="comparison",
+    )
+
+    batch = await retriever.search(task, 8, SourceScope.PUBLIC)
+
+    assert [paper.paper_id for paper in batch.papers] == ["relevant-rag"]
+    radar = next(item for item in batch.diagnostics if item["paper_id"] == "unrelated-radar")
+    assert radar["accepted"] is False
+    assert radar["selected"] is False
+    assert "rejected" in radar["reason"]

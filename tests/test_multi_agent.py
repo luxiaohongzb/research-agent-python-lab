@@ -86,9 +86,11 @@ async def test_deep_question_dispatches_bounded_workers_concurrently() -> None:
     )
 
     assert provider.peak_active == 2
-    assert len(result.workers) == 2
-    assert result.budget.used_workers == 2
-    assert result.budget.used_queries == 2
+    # max_workers limits concurrent workers; remaining planned tasks continue
+    # in a later bounded wave instead of being silently dropped.
+    assert len(result.workers) == 3
+    assert result.budget.used_workers == 3
+    assert result.budget.used_queries == 3
     assert all(item.status is WorkerStatus.COMPLETED for item in result.workers)
     assert all(item.artifact_ref is not None for item in result.workers)
     assert "dispatch_workers" in [event.node for event in result.trace]

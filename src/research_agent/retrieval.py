@@ -56,6 +56,7 @@ class RetrievalBatch:
     passages: tuple[Passage, ...]
     hits: tuple[RetrievalHit, ...]
     errors: tuple[str, ...]
+    diagnostics: tuple[dict[str, Any], ...] = ()
 
 
 class HashEmbeddingModel:
@@ -312,20 +313,71 @@ class ResearchRetriever:
         }
         paper_scores = dict(reciprocal_rank_fusion(paper_rankings))
         all_papers = [*metadata_batch.papers, *graph_papers, *(hit.paper for hit in index_hits)]
-        papers = deduplicate_papers(all_papers)
+        candidates = deduplicate_papers(all_papers)
+        indexed_text = {
+            paper_id: " ".join(
+                hit.passage.text for hit in index_hits if hit.paper.paper_id == paper_id
+            )
+            for paper_id in {hit.paper.paper_id for hit in index_hits}
+        }
+        decisions = [
+            _candidate_decision(
+                task,
+                paper,
+                paper_scores.get(paper.paper_id, 0),
+                supporting_text=indexed_text.get(paper.paper_id, ""),
+            )
+            for paper in candidates
+        ]
+        accepted_ids = {str(decision["paper_id"]) for decision in decisions if decision["accepted"]}
         papers = sorted(
             (
-                paper.model_copy(update={"score": paper_scores.get(paper.paper_id, 0)})
-                for paper in papers
+                paper.model_copy(
+                    update={
+                        # RRF is a rank-fusion signal, not a relevance probability.
+                        # Persist the independently calculated query relevance instead.
+                        "score": float(
+                            next(
+                                item["relevance_score"]
+                                for item in decisions
+                                if item["paper_id"] == paper.paper_id
+                            )
+                        )
+                    }
+                )
+                for paper in candidates
+                if paper.paper_id in accepted_ids
             ),
             key=lambda paper: (-paper.score, -(paper.year or 0), paper.paper_id),
         )[:limit]
+        selected_ids = {paper.paper_id for paper in papers}
+        decisions = [
+            {
+                **decision,
+                "selected": decision["paper_id"] in selected_ids,
+                "reason": (
+                    "selected by relevance-gated Top-K"
+                    if decision["paper_id"] in selected_ids
+                    else decision["reason"]
+                    if not decision["accepted"]
+                    else "relevant candidate ranked below Top-K"
+                ),
+            }
+            for decision in decisions
+        ]
         reranked = await self._reranker.rerank(task.query, index_hits, limit * 2)
+        reranked = tuple(
+            hit
+            for hit in reranked
+            if hit.paper.paper_id in selected_ids
+            and _passage_is_relevant(task, hit.paper, hit.passage)
+        )
         return RetrievalBatch(
             papers=tuple(papers),
             passages=tuple(hit.passage for hit in reranked),
             hits=reranked,
             errors=tuple(errors),
+            diagnostics=tuple(decisions),
         )
 
     async def upsert(self, document: ParsedDocument) -> None:
@@ -373,3 +425,48 @@ def _cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float:
 
 async def _empty_hits() -> tuple[RetrievalHit, ...]:
     return ()
+
+
+def _candidate_decision(
+    task: SearchTask,
+    paper: Paper,
+    rrf_score: float,
+    *,
+    supporting_text: str = "",
+) -> dict[str, Any]:
+    query = f"{task.query} {task.sub_question}"
+    query_tokens = tokenize(query)
+    title_tokens = tokenize(paper.title)
+    body_tokens = tokenize(f"{paper.title} {paper.abstract} {supporting_text}")
+    overlap = query_tokens & body_tokens
+    title_overlap = query_tokens & title_tokens
+    required_overlap = min(2, max(1, len(query_tokens) // 4))
+    accepted = len(overlap) >= required_overlap
+    score = 0.7 * (len(overlap) / max(1, len(query_tokens))) + 0.3 * (
+        len(title_overlap) / max(1, min(len(query_tokens), 5))
+    )
+    if not paper.abstract.strip() and not supporting_text.strip() and not title_overlap:
+        accepted = False
+        reason = "rejected: no query terms in title and no searchable abstract"
+    elif not accepted:
+        reason = f"rejected: only {len(overlap)}/{required_overlap} required query terms matched"
+    else:
+        reason = "passed relevance gate"
+    return {
+        "paper_id": paper.paper_id,
+        "title": paper.title,
+        "source": paper.source,
+        "accepted": accepted,
+        "selected": False,
+        "relevance_score": round(score, 4),
+        "rrf_score": round(rrf_score, 6),
+        "matched_terms": sorted(overlap)[:8],
+        "reason": reason,
+    }
+
+
+def _passage_is_relevant(task: SearchTask, paper: Paper, passage: Passage) -> bool:
+    query_tokens = tokenize(f"{task.query} {task.sub_question}")
+    text_tokens = tokenize(f"{paper.title} {passage.text}")
+    required_overlap = min(2, max(1, len(query_tokens) // 4))
+    return len(query_tokens & text_tokens) >= required_overlap

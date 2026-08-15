@@ -90,7 +90,8 @@ class ResearchBudget(FrozenModel):
 
     @property
     def remaining_workers(self) -> int:
-        return max(0, self.max_workers - self.used_workers)
+        # max_workers is a concurrency limit. used_workers is cumulative telemetry.
+        return self.max_workers
 
     @property
     def exhausted_limits(self) -> tuple[str, ...]:
@@ -114,8 +115,8 @@ class ResearchBudget(FrozenModel):
             raise BudgetExceededError("query budget exhausted")
         if self.used_tool_calls + tool_calls > self.max_tool_calls:
             raise BudgetExceededError("tool-call budget exhausted")
-        if self.used_workers + workers > self.max_workers:
-            raise BudgetExceededError("worker budget exhausted")
+        if workers > self.max_workers:
+            raise BudgetExceededError("worker concurrency limit exceeded")
         return self.model_copy(
             update={
                 "used_queries": self.used_queries + queries,
@@ -276,6 +277,11 @@ class ResearchWorkerResult(FrozenModel):
     artifact_ref: ArtifactRef | None = None
     elapsed_ms: int = Field(ge=0)
     error_type: str | None = None
+    retrieval_query: str = ""
+    candidates_considered: int = Field(default=0, ge=0)
+    candidates_selected: int = Field(default=0, ge=0)
+    candidates_rejected: int = Field(default=0, ge=0)
+    retrieval_decisions: tuple[dict[str, Any], ...] = ()
 
 
 class ResearchWorkerAssignment(FrozenModel):

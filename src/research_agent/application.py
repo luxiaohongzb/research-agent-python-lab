@@ -134,6 +134,9 @@ STEP_METRIC_KEYS = frozenset(
         "blocked_claims",
         "budget_limits",
         "claim_count",
+        "candidates_considered",
+        "candidates_rejected",
+        "candidates_selected",
         "complexity",
         "compound_claim_count",
         "coverage_score",
@@ -146,6 +149,7 @@ STEP_METRIC_KEYS = frozenset(
         "passage_count",
         "retrieval_errors",
         "retrieval_lanes",
+        "retrieval_queries",
         "search_task_count",
         "source_scope",
         "sources",
@@ -465,6 +469,7 @@ class ResearchApplicationService:
         run_started = time.monotonic()
         stage_started = run_started
         active_stage = "plan"
+        model_started: dict[str, tuple[str, float, bool]] = {}
 
         async def progress(node: str, details: dict[str, object]) -> None:
             nonlocal active_stage, stage_started
@@ -476,6 +481,9 @@ class ResearchApplicationService:
                 decision = trace_details.get("decision")
                 if decision in {"refine", "synthesize"}:
                     next_stage = str(decision)
+            now = time.monotonic()
+            stage_duration = max(0.0, now - stage_started)
+            self._observability.stage_finished(node, stage_duration)
             await self._events.publish(
                 snapshot.run_id,
                 "progress",
@@ -483,20 +491,45 @@ class ResearchApplicationService:
                     "node": node,
                     "next_node": next_stage,
                     "stage_status": "completed",
+                    "stage_duration_ms": round(stage_duration * 1_000),
                     "step_trace": _step_trace(node, details, next_stage=next_stage),
                     **details,
                 },
             )
             active_stage = next_stage
-            stage_started = time.monotonic()
+            stage_started = now
 
         async def model_progress(node: str, details: dict[str, object]) -> None:
+            if await self._cancellations.is_requested(snapshot.run_id):
+                raise RunCancellationRequested(snapshot.run_id)
+            event_details = dict(details)
+            invocation_id = str(details.get("invocation_id") or "")
+            phase = str(details.get("phase") or "")
+            now = time.monotonic()
+            if invocation_id and phase == "started":
+                model_started[invocation_id] = (node, now, False)
+            elif invocation_id and invocation_id in model_started:
+                stage, started_at, first_token_seen = model_started[invocation_id]
+                if phase == "delta" and not first_token_seen:
+                    first_token_seconds = max(0.0, now - started_at)
+                    self._observability.model_first_token(stage, first_token_seconds)
+                    event_details["first_token_ms"] = round(first_token_seconds * 1_000)
+                    model_started[invocation_id] = (stage, started_at, True)
+                elif phase in {"completed", "failed"}:
+                    duration_seconds = max(0.0, now - started_at)
+                    self._observability.model_finished(
+                        stage,
+                        duration_seconds,
+                        status="success" if phase == "completed" else "failed",
+                    )
+                    event_details["model_duration_ms"] = round(duration_seconds * 1_000)
+                    model_started.pop(invocation_id, None)
             await self._events.publish(
                 snapshot.run_id,
                 "model_stream",
                 {
                     "node": node,
-                    **details,
+                    **event_details,
                 },
             )
 

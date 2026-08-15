@@ -1,12 +1,15 @@
+import httpx
 import pytest
 
 from research_agent.domain import Paper, SearchTask, SourceScope
 from research_agent.providers import (
     CompositePaperProvider,
     OfflinePaperProvider,
+    ResilientProvider,
     deduplicate_papers,
     stable_paper_id,
 )
+from research_agent.resilience import RetryPolicy
 
 
 class NamedProvider:
@@ -73,3 +76,34 @@ def test_composite_provider_uses_offline_only_as_auto_fallback() -> None:
 
     assert provider.provider_names_for(SourceScope.AUTO) == ("offline",)
     assert provider.provider_names_for(SourceScope.ALL) == ()
+
+
+@pytest.mark.asyncio
+async def test_resilient_provider_preserves_name_and_retries_timeout() -> None:
+    class FlakyProvider:
+        name = "flaky"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def search(self, task: SearchTask, limit: int) -> list[Paper]:
+            del task, limit
+            self.calls += 1
+            if self.calls == 1:
+                raise httpx.ReadTimeout("temporary provider timeout")
+            return []
+
+    flaky = FlakyProvider()
+    provider = ResilientProvider(
+        flaky,
+        policy=RetryPolicy(max_attempts=2, initial_backoff_seconds=0),
+    )
+
+    result = await provider.search(
+        SearchTask(sub_question="retry", query="retry", purpose="test"),
+        1,
+    )
+
+    assert provider.name == "flaky"
+    assert result == []
+    assert flaky.calls == 2

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import re
 import xml.etree.ElementTree as ET
@@ -16,7 +15,9 @@ from research_agent.domain import (
     ParsedDocument,
     Passage,
 )
+from research_agent.observability import observe_provider_attempt
 from research_agent.providers import normalize_doi, stable_paper_id
+from research_agent.resilience import RetryPolicy, retry_async
 
 TEI = "{http://www.tei-c.org/ns/1.0}"
 XML = "{http://www.w3.org/XML/1998/namespace}"
@@ -33,11 +34,17 @@ class GrobidClient:
         base_url: str = "http://127.0.0.1:8070",
         timeout_seconds: float = 120,
         max_attempts: int = 3,
+        initial_backoff_seconds: float = 0.25,
+        max_backoff_seconds: float = 4.0,
         max_pdf_bytes: int = 30 * 1024 * 1024,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._max_attempts = max_attempts
+        self._retry_policy = RetryPolicy(
+            max_attempts=max_attempts,
+            initial_backoff_seconds=initial_backoff_seconds,
+            max_backoff_seconds=max_backoff_seconds,
+        )
         self._max_pdf_bytes = max_pdf_bytes
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds))
 
@@ -54,7 +61,8 @@ class GrobidClient:
             "generateIDs": "1",
             "teiCoordinates": ["head", "p", "figure", "biblStruct"],
         }
-        for attempt in range(1, self._max_attempts + 1):
+
+        async def request() -> bytes:
             response = await self._client.post(
                 f"{self._base_url}/api/processFulltextDocument",
                 data=data,
@@ -64,11 +72,24 @@ class GrobidClient:
                 return response.content
             if response.status_code == 204:
                 raise GrobidError("GROBID extracted no content from the PDF")
-            if response.status_code == 503 and attempt < self._max_attempts:
-                await asyncio.sleep(min(5, attempt * 2))
-                continue
-            raise GrobidError(f"GROBID returned HTTP {response.status_code}")
-        raise GrobidError("GROBID retry budget exhausted")
+            response.raise_for_status()
+            raise GrobidError(f"GROBID returned unexpected HTTP {response.status_code}")
+
+        try:
+            return await retry_async(
+                request,
+                policy=self._retry_policy,
+                observer=lambda attempt, duration, outcome, retrying: observe_provider_attempt(
+                    "grobid",
+                    "process_pdf",
+                    attempt,
+                    duration,
+                    outcome,
+                    retrying,
+                ),
+            )
+        except httpx.HTTPStatusError as exc:
+            raise GrobidError(f"GROBID returned HTTP {exc.response.status_code}") from exc
 
 
 class TeiParser:
