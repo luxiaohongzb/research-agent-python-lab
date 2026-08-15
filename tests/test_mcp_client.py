@@ -76,6 +76,87 @@ async def test_mcp_paper_provider_uses_real_protocol_and_validates_output() -> N
 
 
 @pytest.mark.asyncio
+async def test_zotero_tools_enrich_search_results_with_metadata_and_content() -> None:
+    server = MCPServer("zotero-integrated-mcp")
+
+    @server.tool()
+    def search_library(q: str, limit: int, mode: str) -> dict[str, Any]:
+        return {
+            "results": [
+                {
+                    "key": "ZOTERO1",
+                    "title": f"Zotero result for {q}",
+                    "creators": "Ada Researcher, Lin Scientist",
+                    "date": "2024",
+                }
+            ][:limit],
+            "mode": mode,
+        }
+
+    @server.tool()
+    def get_item_details(itemKey: str, mode: str) -> dict[str, Any]:
+        return {
+            "key": itemKey,
+            "title": "Zotero evidence study",
+            "creators": [
+                {"firstName": "Ada", "lastName": "Researcher"},
+                {"firstName": "Lin", "lastName": "Scientist"},
+            ],
+            "date": "2024-06-01",
+            "DOI": "10.5555/zotero-mcp",
+            "abstractNote": "Structured abstract from Zotero.",
+            "url": "https://example.org/zotero-mcp",
+            "mode": mode,
+        }
+
+    @server.tool()
+    def get_content(itemKey: str, mode: str, format: str) -> dict[str, Any]:
+        return {
+            "itemKey": itemKey,
+            "content": {
+                "attachments": [{"content": "Full-text evidence retrieved through Zotero MCP."}]
+            },
+            "mode": mode,
+            "format": format,
+        }
+
+    config = McpPaperServerConfig(
+        name="zotero-mcp",
+        url="http://127.0.0.1:9999/mcp",
+        search_tool="search_library",
+        query_argument="q",
+        static_arguments={"mode": "standard"},
+        detail_tool="get_item_details",
+        detail_static_arguments={"mode": "standard"},
+        content_tool="get_content",
+        content_static_arguments={"mode": "preview", "format": "json"},
+        content_only_when_abstract_missing=False,
+    )
+    provider = McpPaperProvider(
+        config,
+        OfficialMcpToolGateway(config, target=server),
+    )
+
+    papers = await provider.search(
+        SearchTask(
+            sub_question="Zotero evidence",
+            query="scientific radar",
+            purpose="test Zotero mapping",
+        ),
+        limit=2,
+    )
+
+    assert len(papers) == 1
+    assert papers[0].title == "Zotero evidence study"
+    assert papers[0].authors == ("Ada Researcher", "Lin Scientist")
+    assert papers[0].year == 2024
+    assert papers[0].doi == "10.5555/zotero-mcp"
+    assert papers[0].external_ids["zotero_key"] == "ZOTERO1"
+    assert "Structured abstract" in papers[0].abstract
+    assert "Full-text evidence" in papers[0].abstract
+
+
+@pytest.mark.asyncio
 async def test_mcp_gateway_connects_over_streamable_http() -> None:
     mcp_server = MCPServer("remote-paper-catalog")
 

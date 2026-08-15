@@ -1,4 +1,4 @@
-# Atlas Research v1.3 产品交付手册
+# Atlas Research v1.4 产品交付手册
 
 ## React 产品入口
 

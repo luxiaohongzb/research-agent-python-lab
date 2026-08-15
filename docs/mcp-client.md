@@ -4,10 +4,10 @@
 
 本项目作为 MCP Client 连接外部科研工具。MCP 只替换或扩展数据获取层，不能绕过现有的预算、去重、EvidenceCard、原子 Claim、独立 Verifier 和质量门禁。
 
-当前实现使用官方 MCP Python SDK 2.x，通过 Streamable HTTP 连接一个或多个 MCP Server。每个 Server 显式配置一个只读论文搜索工具；模型不能任意选择或调用未列入配置的工具。
+当前实现使用官方 MCP Python SDK 2.x，通过 Streamable HTTP 连接一个或多个 MCP Server。每个 Server 显式配置只读的搜索、详情与内容工具；模型不能任意选择或调用未列入配置的工具。
 
 ```text
-MCP Server search tool
+MCP search → optional details/content tools
         ↓ structured JSON
 McpPaperProvider
         ↓ Paper domain validation
@@ -56,6 +56,27 @@ RESEARCH_AGENT_MCP_PAPER_SERVERS_JSON=[{"name":"zotero","url":"http://127.0.0.1:
 MCP_BEARER_TOKEN=replace-with-real-token
 ```
 
+### Zotero Integrated MCP
+
+Zotero 桌面端在 `127.0.0.1:23120/mcp` 提供 Streamable HTTP 时使用：
+
+```dotenv
+RESEARCH_AGENT_MCP_ENABLED=true
+RESEARCH_AGENT_MCP_TIMEOUT_SECONDS=45
+RESEARCH_AGENT_MCP_PAPER_SERVERS_JSON=[{"name":"zotero-mcp","url":"http://127.0.0.1:23120/mcp","search_tool":"search_library","query_argument":"q","static_arguments":{"mode":"standard","relevanceScoring":true},"detail_tool":"get_item_details","detail_static_arguments":{"mode":"standard"},"content_tool":"get_content","content_static_arguments":{"mode":"preview","format":"json"},"max_results":8,"max_enrichment_results":8,"enrichment_concurrency":3,"content_max_chars":12000}]
+```
+
+适配器先用 `search_library` 查找条目，再受控并发调用 `get_item_details` 补齐作者、年份、DOI 与摘要；摘要缺失时调用 `get_content` 获取可用于证据抽取的预览全文。设置 `content_only_when_abstract_missing=false` 可以始终加入全文预览。Zotero 的 `key` 会保存为 `external_ids.zotero_key`。任一增强调用失败时仍保留基础搜索结果，不影响其他检索源。
+
+Zotero Integrated MCP 当前只监听 Windows 回环地址时，Docker 容器无法通过 `host.docker.internal` 访问它。此时 PostgreSQL、Redis、MinIO 可以继续运行在 Docker，但 API 与 Worker 必须运行在 Windows 主机：
+
+```powershell
+research-agent-server
+research-agent-worker
+```
+
+只有当 Zotero MCP 明确监听宿主机可路由地址时，才能把 URL 改为 `http://host.docker.internal:23120/mcp` 并使用容器 Worker。
+
 Docker 中访问宿主机 MCP Server 时使用：
 
 ```dotenv
@@ -94,7 +115,7 @@ docker compose up -d --build --force-recreate api worker
 
 `trust_env` 默认关闭，避免本机或容器内的 MCP 流量被系统代理意外转发。只有明确需要通过企业 HTTP 代理访问 MCP Server 时才应开启。
 
-首次工具调用会读取 Server 的工具列表并校验：工具名必须存在；query/limit 参数必须出现在 input schema；所有必填参数必须由动态映射或 `static_arguments` 提供。配置错误会失败，而不是让模型猜测参数。
+首次工具调用会读取 Server 的工具列表并逐个校验：工具名必须存在；搜索工具的 query/limit 参数必须出现在 input schema；所有必填参数必须由动态映射或对应的 `static_arguments` 提供。配置错误会失败，而不是让模型猜测参数。
 
 ## 诊断
 
@@ -111,7 +132,7 @@ curl http://127.0.0.1:8000/v1/integrations/mcp \
 
 ## 安全边界
 
-- 仅调用配置中的 `search_tool`，不把完整工具列表交给模型自由选择；
+- 仅调用配置中的只读 `search_tool`、`detail_tool` 和 `content_tool`，不把完整工具列表交给模型自由选择；
 - MCP 返回值视为不可信数据，必须经过 JSON、Pydantic 和领域模型校验；
 - 远端文本不能作为系统指令，仍受项目 Prompt Injection 边界约束；
 - 每个 Server 有超时和最大结果数，调用也计入研究工具预算；

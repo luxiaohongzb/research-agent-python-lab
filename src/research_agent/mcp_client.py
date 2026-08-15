@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import json
 import os
+import re
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any, Protocol
@@ -42,6 +43,17 @@ class McpPaperServerConfig(BaseModel):
     year_from_argument: str | None = Field(default=None, min_length=1, max_length=100)
     year_to_argument: str | None = Field(default=None, min_length=1, max_length=100)
     static_arguments: dict[str, JsonScalar] = Field(default_factory=dict)
+    detail_tool: str | None = Field(default=None, min_length=1, max_length=200)
+    detail_key_argument: str = Field(default="itemKey", min_length=1, max_length=100)
+    detail_static_arguments: dict[str, JsonScalar] = Field(default_factory=dict)
+    content_tool: str | None = Field(default=None, min_length=1, max_length=200)
+    content_key_argument: str = Field(default="itemKey", min_length=1, max_length=100)
+    content_static_arguments: dict[str, JsonScalar] = Field(default_factory=dict)
+    content_only_when_abstract_missing: bool = True
+    item_key_field: str = Field(default="key", min_length=1, max_length=100)
+    enrichment_concurrency: int = Field(default=3, ge=1, le=10)
+    max_enrichment_results: int = Field(default=8, ge=0, le=50)
+    content_max_chars: int = Field(default=12_000, ge=500, le=100_000)
     max_results: int = Field(default=50, ge=1, le=100)
     trust_env: bool = False
 
@@ -78,19 +90,19 @@ class OfficialMcpToolGateway:
         self._config = config
         self._timeout_seconds = timeout_seconds
         self._target = target
-        self._verified = False
+        self._verified_tools: set[str] = set()
         self._verification_lock = asyncio.Lock()
 
     async def call_tool(
         self, tool_name: str, arguments: Mapping[str, JsonScalar]
     ) -> dict[str, Any] | list[Any]:
-        if tool_name != self._config.search_tool:
+        if tool_name not in _configured_tools(self._config):
             raise McpToolError(f"MCP tool is not allow-listed: {tool_name}")
         validation_error: McpToolError | McpConfigurationError | None = None
         result: Any = None
         async with asyncio.timeout(self._timeout_seconds):
             async with self._connect() as client:
-                validation_error = await self._verify_tool(client, tool_name)
+                validation_error = await self._verify_tool(client, tool_name, arguments)
                 if validation_error is None:
                     result = await client.call_tool(tool_name, dict(arguments))
         if validation_error is not None:
@@ -115,7 +127,7 @@ class OfficialMcpToolGateway:
                         protocol_version=str(client.protocol_version),
                         server_name=(str(server_info.name) if server_info else None),
                         tools=tools,
-                        configured_tool_available=self._config.search_tool in tools,
+                        configured_tool_available=_configured_tools(self._config).issubset(tools),
                     )
         except Exception as exc:
             return McpServerStatus(
@@ -126,12 +138,15 @@ class OfficialMcpToolGateway:
             )
 
     async def _verify_tool(
-        self, client: Any, tool_name: str
+        self,
+        client: Any,
+        tool_name: str,
+        arguments: Mapping[str, JsonScalar],
     ) -> McpToolError | McpConfigurationError | None:
-        if self._verified:
+        if tool_name in self._verified_tools:
             return None
         async with self._verification_lock:
-            if self._verified:
+            if tool_name in self._verified_tools:
                 return None
             listed = await client.list_tools()
             tool = next((item for item in listed.tools if item.name == tool_name), None)
@@ -140,10 +155,15 @@ class OfficialMcpToolGateway:
                     f"configured MCP tool {tool_name!r} was not advertised by "
                     f"server {self._config.name!r}"
                 )
-            validation_error = _tool_schema_error(self._config, tool)
+            validation_error = _tool_schema_error(
+                self._config,
+                tool,
+                tool_name=tool_name,
+                arguments=arguments,
+            )
             if validation_error is not None:
                 return validation_error
-            self._verified = True
+            self._verified_tools.add(tool_name)
             return None
 
     @asynccontextmanager
@@ -201,12 +221,60 @@ class McpPaperProvider:
             arguments[self._config.year_to_argument] = task.year_to
         payload = await self._gateway.call_tool(self._config.search_tool, arguments)
         records = _paper_records(payload)
+        records = await self._enrich(records[:bounded_limit])
         papers = [
-            paper
-            for item in records[:bounded_limit]
-            if (paper := _to_paper(item, source=self.name)) is not None
+            paper for item in records if (paper := _to_paper(item, source=self.name)) is not None
         ]
         return papers
+
+    async def _enrich(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        limit = min(len(records), self._config.max_enrichment_results)
+        if limit <= 0 or not (self._config.detail_tool or self._config.content_tool):
+            return records
+        semaphore = asyncio.Semaphore(self._config.enrichment_concurrency)
+
+        async def enrich(record: dict[str, Any]) -> dict[str, Any]:
+            key = str(record.get(self._config.item_key_field) or "").strip()
+            if not key:
+                return record
+            async with semaphore:
+                enriched = dict(record)
+                if self._config.detail_tool:
+                    try:
+                        details = await self._gateway.call_tool(
+                            self._config.detail_tool,
+                            {
+                                **self._config.detail_static_arguments,
+                                self._config.detail_key_argument: key,
+                            },
+                        )
+                        enriched.update(_single_record(details))
+                    except Exception:
+                        pass
+                if self._config.content_tool and (
+                    not self._config.content_only_when_abstract_missing
+                    or not _abstract_text(enriched)
+                ):
+                    try:
+                        content = await self._gateway.call_tool(
+                            self._config.content_tool,
+                            {
+                                **self._config.content_static_arguments,
+                                self._config.content_key_argument: key,
+                            },
+                        )
+                        excerpt = _content_excerpt(
+                            content,
+                            max_chars=self._config.content_max_chars,
+                        )
+                        if excerpt:
+                            enriched["_mcp_content"] = excerpt
+                    except Exception:
+                        pass
+                return enriched
+
+        enriched = await asyncio.gather(*(enrich(record) for record in records[:limit]))
+        return [*enriched, *records[limit:]]
 
 
 def parse_mcp_paper_servers(value: str) -> tuple[McpPaperServerConfig, ...]:
@@ -257,26 +325,35 @@ def _bearer_token(config: McpPaperServerConfig) -> str | None:
     return value
 
 
-def _tool_schema_error(config: McpPaperServerConfig, tool: Any) -> McpConfigurationError | None:
+def _configured_tools(config: McpPaperServerConfig) -> set[str]:
+    return {
+        tool
+        for tool in (config.search_tool, config.detail_tool, config.content_tool)
+        if tool is not None
+    }
+
+
+def _tool_schema_error(
+    config: McpPaperServerConfig,
+    tool: Any,
+    *,
+    tool_name: str,
+    arguments: Mapping[str, JsonScalar],
+) -> McpConfigurationError | None:
     schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None) or {}
     if not isinstance(schema, dict):
         return None
     properties = schema.get("properties")
     if not isinstance(properties, dict):
         return None
-    supplied = {
-        *config.static_arguments,
-        config.query_argument,
-        config.limit_argument,
-        *([config.year_from_argument] if config.year_from_argument else []),
-        *([config.year_to_argument] if config.year_to_argument else []),
-    }
-    missing_mappings = {config.query_argument, config.limit_argument} - properties.keys()
-    if missing_mappings:
-        return McpConfigurationError(
-            f"MCP tool {config.search_tool!r} does not declare configured arguments: "
-            f"{', '.join(sorted(missing_mappings))}"
-        )
+    supplied = set(arguments)
+    if tool_name == config.search_tool:
+        missing_mappings = {config.query_argument, config.limit_argument} - properties.keys()
+        if missing_mappings:
+            return McpConfigurationError(
+                f"MCP tool {config.search_tool!r} does not declare configured arguments: "
+                f"{', '.join(sorted(missing_mappings))}"
+            )
     required = schema.get("required")
     if isinstance(required, list):
         missing_required = {str(item) for item in required} - supplied
@@ -334,34 +411,86 @@ def _paper_records(payload: dict[str, Any] | list[Any]) -> list[dict[str, Any]]:
     return [dict(item) for item in values if isinstance(item, dict)]
 
 
+def _single_record(payload: dict[str, Any] | list[Any]) -> dict[str, Any]:
+    records = _paper_records(payload)
+    if records:
+        return records[0]
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _content_excerpt(payload: dict[str, Any] | list[Any], *, max_chars: int) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    content = payload.get("content")
+    if not isinstance(content, dict):
+        return ""
+    parts: list[str] = []
+    abstract = content.get("abstract")
+    if isinstance(abstract, dict) and abstract.get("content"):
+        parts.append(str(abstract["content"]).strip())
+    for key in ("attachments", "notes"):
+        values = content.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if isinstance(item, dict) and item.get("content"):
+                parts.append(str(item["content"]).strip())
+    text = "\n\n".join(dict.fromkeys(part for part in parts if part))
+    return text[:max_chars]
+
+
+def _abstract_text(item: Mapping[str, Any]) -> str:
+    parts = [
+        str(value).strip()
+        for value in (
+            item.get("abstract"),
+            item.get("abstractNote"),
+            item.get("summary"),
+            item.get("_mcp_content"),
+        )
+        if value and str(value).strip()
+    ]
+    return "\n\n".join(dict.fromkeys(parts))
+
+
 def _to_paper(item: dict[str, Any], *, source: str) -> Paper | None:
     title = str(item.get("title") or "").strip()
     if not title:
         return None
-    doi = normalize_doi(str(item["doi"])) if item.get("doi") else None
-    authors = _authors(item.get("authors"))
-    year = _year(item.get("year"))
+    doi_value = item.get("doi") or item.get("DOI")
+    doi = normalize_doi(str(doi_value)) if doi_value else None
+    authors = _authors(item.get("authors") or item.get("creators"))
+    year = _year(item.get("year") or item.get("date"))
     external_ids = item.get("external_ids")
     if not isinstance(external_ids, dict):
         external_ids = {}
+    item_key = item.get("key")
+    if item_key:
+        external_ids = {**external_ids, "zotero_key": str(item_key)}
+    abstract = _abstract_text(item)
     try:
         return Paper(
             paper_id=stable_paper_id(doi=doi, title=title),
             title=title,
-            abstract=str(item.get("abstract") or ""),
+            abstract=abstract,
             authors=authors,
             year=year,
             doi=doi,
             url=item.get("url"),
             source=source,
             external_ids={str(key): str(value) for key, value in external_ids.items()},
-            score=max(0.0, float(item.get("score") or 0.0)),
+            score=max(
+                0.0,
+                float(item.get("score") or item.get("relevanceScore") or 0.0),
+            ),
         )
     except (TypeError, ValueError, ValidationError):
         return None
 
 
 def _authors(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return tuple(name.strip() for name in value.split(",") if name.strip())
     if not isinstance(value, list):
         return ()
     names: list[str] = []
@@ -370,6 +499,12 @@ def _authors(value: Any) -> tuple[str, ...]:
             name = item.strip()
         elif isinstance(item, dict):
             name = str(item.get("name") or item.get("display_name") or "").strip()
+            if not name:
+                name = " ".join(
+                    str(item.get(key) or "").strip()
+                    for key in ("firstName", "lastName")
+                    if item.get(key)
+                )
         else:
             name = ""
         if name:
@@ -381,7 +516,8 @@ def _year(value: Any) -> int | None:
     if value is None:
         return None
     try:
-        year = int(value)
+        match = re.search(r"\b(19|20|21)\d{2}\b", str(value))
+        year = int(match.group(0)) if match else int(value)
     except (TypeError, ValueError):
         return None
     return year if 1900 <= year <= 2100 else None
