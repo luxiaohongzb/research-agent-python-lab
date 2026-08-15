@@ -134,6 +134,9 @@ STEP_METRIC_KEYS = frozenset(
         "blocked_claims",
         "budget_limits",
         "claim_count",
+        "candidates_considered",
+        "candidates_rejected",
+        "candidates_selected",
         "complexity",
         "compound_claim_count",
         "coverage_score",
@@ -146,6 +149,7 @@ STEP_METRIC_KEYS = frozenset(
         "passage_count",
         "retrieval_errors",
         "retrieval_lanes",
+        "retrieval_queries",
         "search_task_count",
         "source_scope",
         "sources",
@@ -491,6 +495,8 @@ class ResearchApplicationService:
             stage_started = time.monotonic()
 
         async def model_progress(node: str, details: dict[str, object]) -> None:
+            if await self._cancellations.is_requested(snapshot.run_id):
+                raise RunCancellationRequested(snapshot.run_id)
             await self._events.publish(
                 snapshot.run_id,
                 "model_stream",

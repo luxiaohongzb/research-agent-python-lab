@@ -51,6 +51,7 @@ from research_agent.providers import (
     OfflinePaperProvider,
     OpenAlexPaperProvider,
     deduplicate_papers,
+    relevance,
 )
 from research_agent.reasoner import DeterministicReasoner, Reasoned, ResearchReasoner
 from research_agent.retrieval import (
@@ -328,7 +329,11 @@ class ResearchWorkflow:
             {"collect_workers": "collect_workers"},
         )
         builder.add_edge("research_worker", "collect_workers")
-        builder.add_edge("collect_workers", "normalize")
+        builder.add_conditional_edges(
+            "collect_workers",
+            self._route_after_collect,
+            {"dispatch_workers": "dispatch_workers", "normalize": "normalize"},
+        )
         builder.add_edge("search", "normalize")
         builder.add_edge("normalize", "extract_evidence")
         builder.add_edge("extract_evidence", "assess_coverage")
@@ -381,12 +386,14 @@ class ResearchWorkflow:
             )
             for index, task in enumerate(tasks[:capacity], start=1)
         ]
+        pending = tasks[capacity:]
         warnings = list(state.get("warnings", []))
         if not assignments:
             warnings.append("Supervisor skipped worker dispatch because a run limit was exhausted.")
         return {
             "budget": budget.model_dump(mode="json"),
             "worker_assignments": [item.model_dump(mode="json") for item in assignments],
+            "pending_tasks": [item.model_dump(mode="json") for item in pending],
             "warnings": warnings,
             "trace": _trace(
                 state,
@@ -396,6 +403,7 @@ class ResearchWorkflow:
                     "worker_ids": [item.worker_id for item in assignments],
                     "artifact_handoff": True,
                     "max_workers": budget.max_workers,
+                    "pending_task_count": len(pending),
                     "source_scope": request.source_scope.value,
                     "sources": self._retrieval_source_names(request.source_scope),
                 },
@@ -421,6 +429,7 @@ class ResearchWorkflow:
         artifact_ref: ArtifactRef | None = None
         status = WorkerStatus.COMPLETED
         error_type: str | None = None
+        batch: RetrievalBatch | None = None
         try:
             async with asyncio.timeout(assignment.timeout_seconds):
                 batch = await self._retrieve(
@@ -447,16 +456,31 @@ class ResearchWorkflow:
             artifact_ref=artifact_ref,
             elapsed_ms=int((time.monotonic() - started) * 1_000),
             error_type=error_type,
+            retrieval_query=assignment.task.query,
+            candidates_considered=len(batch.diagnostics) if batch else 0,
+            candidates_selected=(
+                sum(bool(item.get("selected")) for item in batch.diagnostics) if batch else 0
+            ),
+            candidates_rejected=(
+                sum(not bool(item.get("accepted")) for item in batch.diagnostics) if batch else 0
+            ),
+            retrieval_decisions=batch.diagnostics[:12] if batch else (),
         )
         return {"worker_outputs": [result.model_dump(mode="json")]}
 
     async def _collect_workers(self, state: ResearchState) -> dict[str, Any]:
         request = ResearchRequest.model_validate(state["request"])
         retrieval_lanes = self._retrieval_lane_count(request.source_scope)
+        assignment_task_ids = {
+            ResearchWorkerAssignment.model_validate(item).task.task_id
+            for item in state.get("worker_assignments", [])
+        }
         results = [
-            ResearchWorkerResult.model_validate(item) for item in state.get("worker_outputs", [])
+            result
+            for item in state.get("worker_outputs", [])
+            if (result := ResearchWorkerResult.model_validate(item)).task_id in assignment_task_ids
         ]
-        papers = [Paper.model_validate(item) for item in state.get("papers", [])]
+        papers = [Paper.model_validate(item) for item in state.get("raw_papers", [])]
         passages = [Passage.model_validate(item) for item in state.get("raw_passages", [])]
         warnings = list(state.get("warnings", []))
         successful_artifacts = 0
@@ -490,7 +514,10 @@ class ResearchWorkflow:
             "budget": budget.model_dump(mode="json"),
             "raw_papers": [paper.model_dump(mode="json") for paper in papers],
             "raw_passages": [passage.model_dump(mode="json") for passage in passages],
-            "worker_results": [item.model_dump(mode="json") for item in results],
+            "worker_results": [
+                *state.get("worker_results", []),
+                *(item.model_dump(mode="json") for item in results),
+            ],
             "warnings": warnings,
             "trace": _trace(
                 state,
@@ -505,9 +532,31 @@ class ResearchWorkflow:
                     "payloads_in_graph_state": False,
                     "worker_count": len(results),
                     "successful_workers": successful_artifacts,
+                    "retrieval_queries": [item.retrieval_query for item in results],
+                    "candidates_considered": sum(item.candidates_considered for item in results),
+                    "candidates_selected": sum(item.candidates_selected for item in results),
+                    "candidates_rejected": sum(item.candidates_rejected for item in results),
+                    "retrieval_decisions": [
+                        decision
+                        for item in results
+                        for decision in item.retrieval_decisions
+                    ][:18],
                 },
             ),
         }
+
+    def _route_after_collect(
+        self, state: ResearchState
+    ) -> Literal["dispatch_workers", "normalize"]:
+        budget = _budget_with_elapsed(state)
+        if (
+            state.get("pending_tasks")
+            and budget.remaining_queries > 0
+            and budget.used_tool_calls < budget.max_tool_calls
+            and not budget.exhausted_limits
+        ):
+            return "dispatch_workers"
+        return "normalize"
 
     async def _plan(self, state: ResearchState) -> dict[str, Any]:
         request = ResearchRequest.model_validate(state["request"])
@@ -567,10 +616,12 @@ class ResearchWorkflow:
         papers = [Paper.model_validate(item) for item in state.get("papers", [])]
         passages = [Passage.model_validate(item) for item in state.get("raw_passages", [])]
         errors: list[str] = []
+        diagnostics: list[dict[str, Any]] = []
         for batch in batches:
             papers.extend(batch.papers)
             passages.extend(batch.passages)
             errors.extend(batch.errors)
+            diagnostics.extend(batch.diagnostics)
         consumed = budget.consume(
             queries=len(selected),
             tool_calls=len(selected) * retrieval_lanes,
@@ -591,6 +642,15 @@ class ResearchWorkflow:
                     "retrieval_lanes": retrieval_lanes,
                     "source_scope": request.source_scope.value,
                     "sources": self._retrieval_source_names(request.source_scope),
+                    "candidates_considered": len(diagnostics),
+                    "candidates_selected": sum(
+                        bool(item.get("selected")) for item in diagnostics
+                    ),
+                    "candidates_rejected": sum(
+                        not bool(item.get("accepted")) for item in diagnostics
+                    ),
+                    "retrieval_queries": [task.query for task in selected],
+                    "retrieval_decisions": diagnostics[:18],
                 },
             ),
         }
@@ -669,7 +729,15 @@ class ResearchWorkflow:
             reasoned_cards.extend(outputs)
             for output in outputs:
                 stage_budget = _record_output_usage(stage_budget, output, state)
-        evidence = tuple(item.value for item in reasoned_cards if item.value is not None)
+        evidence = tuple(
+            card
+            for item in reasoned_cards
+            if (card := item.value) is not None
+            and relevance(
+                question,
+                f"{paper_by_id[card.paper_id].title} {card.atomic_finding}",
+            ) >= 0.08
+        )
         return {
             "passages": [passage.model_dump(mode="json") for passage in passages],
             "evidence": [card.model_dump(mode="json") for card in evidence],
@@ -687,17 +755,47 @@ class ResearchWorkflow:
 
     async def _assess_coverage(self, state: ResearchState) -> dict[str, Any]:
         evidence = [EvidenceCard.model_validate(item) for item in state.get("evidence", [])]
-        unique_sources = len({card.paper_id for card in evidence})
-        score = min(1.0, unique_sources / 3)
+        papers = {
+            paper.paper_id: paper
+            for item in state.get("papers", [])
+            if (paper := Paper.model_validate(item))
+        }
+        plan = ResearchPlan.model_validate(state["plan"])
+        covered_sub_questions: list[str] = []
+        missing_sub_questions: list[str] = []
+        for sub_question in plan.sub_questions:
+            covered = any(
+                relevance(
+                    sub_question,
+                    f"{papers[card.paper_id].title if card.paper_id in papers else ''} "
+                    f"{card.atomic_finding}",
+                ) >= 0.08
+                for card in evidence
+            )
+            (covered_sub_questions if covered else missing_sub_questions).append(sub_question)
+        sub_question_score = len(covered_sub_questions) / max(1, len(plan.sub_questions))
+        evidence_depth = min(1.0, len(evidence) / max(1, len(plan.sub_questions) * 2))
+        score = round(0.8 * sub_question_score + 0.2 * evidence_depth, 4)
+        unique_sources = len(
+            {
+                papers[card.paper_id].source
+                for card in evidence
+                if card.paper_id in papers
+            }
+        )
         return {
             "coverage_score": score,
             "trace": _trace(
                 state,
                 "assess_coverage",
-                f"Coverage score={score:.2f} from {unique_sources} unique sources.",
+                f"Coverage score={score:.2f}; {len(covered_sub_questions)}/"
+                f"{len(plan.sub_questions)} sub-questions covered.",
                 {
                     "coverage_score": score,
                     "unique_sources": unique_sources,
+                    "covered_sub_questions": covered_sub_questions,
+                    "missing_sub_questions": missing_sub_questions,
+                    "sub_question_coverage": sub_question_score,
                     "decision": self._coverage_decision(state, score),
                 },
             ),
@@ -862,11 +960,10 @@ class ResearchWorkflow:
                     return await reasoner.extract_evidence(question, paper, passage)
             except TimeoutError:
                 pass
-        secondary = await self._baseline_reasoner.extract_evidence(question, paper, passage)
         return Reasoned(
-            secondary.value,
-            secondary.model_invocations,
-            (*secondary.warnings, "extract_evidence exceeded the run deadline; fallback used."),
+            None,
+            (),
+            ("extract_evidence exceeded the run deadline; passage was rejected.",),
         )
 
     async def _verify_with_deadline(
@@ -1140,6 +1237,11 @@ def _progress_update_details(node: str, update: Any) -> dict[str, Any]:
                 "worker_status": worker.status.value,
                 "elapsed_ms": worker.elapsed_ms,
                 "sub_question": worker.sub_question,
+                "retrieval_query": worker.retrieval_query,
+                "candidates_considered": worker.candidates_considered,
+                "candidates_selected": worker.candidates_selected,
+                "candidates_rejected": worker.candidates_rejected,
+                "retrieval_decisions": worker.retrieval_decisions,
             }
     return details
 

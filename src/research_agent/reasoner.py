@@ -107,9 +107,11 @@ class DeterministicReasoner:
             return Reasoned(None)
         best = max(sentences, key=lambda sentence: relevance(question, sentence))
         score = relevance(question, best)
-        if score == 0:
-            best = sentences[0]
-            score = relevance(question, f"{paper.title} {best}")
+        context_score = relevance(question, f"{paper.title} {passage.text}")
+        # A deterministic fallback must be conservative. Returning the first
+        # non-empty sentence here used to turn unrelated documents into evidence.
+        if score <= 0 or context_score < 0.08:
+            return Reasoned(None)
         return Reasoned(
             EvidenceCard(
                 paper_id=paper.paper_id,

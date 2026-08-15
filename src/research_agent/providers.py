@@ -13,18 +13,36 @@ from research_agent.domain import Paper, SearchTask, SourceScope
 
 _SEARCH_STOPWORDS = frozenset(
     {
+        "a",
+        "an",
         "and",
+        "are",
+        "as",
+        "at",
+        "by",
         "conflicting",
         "does",
         "evidence",
+        "exist",
         "for",
+        "from",
         "how",
         "improve",
+        "in",
+        "is",
+        "it",
         "limitations",
+        "main",
+        "of",
+        "on",
+        "or",
         "question",
         "research",
+        "supports",
         "the",
+        "to",
         "what",
+        "with",
     }
 )
 

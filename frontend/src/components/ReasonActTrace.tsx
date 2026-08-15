@@ -1,14 +1,18 @@
 import {
   Activity,
+  ArrowDown,
   BrainCircuit,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   Eye,
   Radio,
+  Search,
   ShieldCheck,
   Wrench,
+  XCircle,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { RunEvent, RunStatus } from "../types";
 
 const TERMINAL = new Set<RunStatus>(["COMPLETED", "NEEDS_REVIEW", "FAILED", "CANCELLED"]);
@@ -70,6 +74,9 @@ const fallbackNarratives: Record<string, { reason: string; action: string }> = {
 const metricLabels: Record<string, string> = {
   blocked_claims: "阻断声明",
   budget_limits: "预算限制",
+  candidates_considered: "候选",
+  candidates_rejected: "已拒绝",
+  candidates_selected: "Top-K 入选",
   claim_count: "声明",
   complexity: "复杂度",
   compound_claim_count: "复合声明",
@@ -83,6 +90,7 @@ const metricLabels: Record<string, string> = {
   passage_count: "段落",
   retrieval_errors: "检索错误",
   retrieval_lanes: "检索通道",
+  retrieval_queries: "实际查询",
   search_task_count: "检索任务",
   source_scope: "来源范围",
   sources: "数据源",
@@ -162,6 +170,8 @@ function metricValue(key: string, value: unknown): string {
 
 export function ReasonActTrace({ events, status }: { events: RunEvent[]; status: RunStatus }): React.JSX.Element {
   const [expanded, setExpanded] = useState(true);
+  const [followLive, setFollowLive] = useState(true);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const steps = useMemo(() => {
     const completed = events.filter((event) => event.event === "progress");
     if (TERMINAL.has(status)) return completed;
@@ -176,6 +186,16 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
   const modelPhase = String(modelDetails.phase ?? "delta");
   const modelPreview = typeof modelDetails.preview === "string" ? modelDetails.preview : "";
   const modelRunning = modelPhase === "started" || modelPhase === "delta";
+  useEffect(() => {
+    if (!expanded || !followLive || !scrollRef.current) return;
+    scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [events, expanded, followLive]);
+
+  function handleScroll(): void {
+    const element = scrollRef.current;
+    if (!element) return;
+    setFollowLive(element.scrollHeight - element.scrollTop - element.clientHeight < 48);
+  }
 
   return (
     <section className="surface reason-act-trace">
@@ -186,6 +206,13 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
         </div>
         <div className="reason-act-head-actions">
           <span>{steps.length} STEPS</span>
+          <button
+            className={followLive ? "follow-live active" : "follow-live"}
+            type="button"
+            onClick={() => setFollowLive((value) => !value)}
+          >
+            <ArrowDown size={15} />{followLive ? "跟随最新" : "恢复跟随"}
+          </button>
           <button type="button" onClick={() => setExpanded((value) => !value)}>
             {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
             {expanded ? "收起过程" : "展开过程"}
@@ -198,6 +225,7 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
             <ShieldCheck size={15} />
             <p><strong>过程透明说明</strong>这里展示的是由真实节点输入、工具动作和输出生成的决策摘要，不展示模型私有思维链。</p>
           </div>
+          <div className="reason-act-scroll" ref={scrollRef} onScroll={handleScroll}>
           {!TERMINAL.has(status) && latestModelStream && (
             <section className={`model-stream-panel ${modelRunning ? "model-stream-panel-live" : ""}`}>
               <header>
@@ -222,6 +250,15 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
                 const step = readStep(event);
                 const metrics = Object.entries(step.metrics).slice(0, 6);
                 const running = event.event === "heartbeat";
+                const traceDetails = asRecord(event.details?.trace_details);
+                const retrievalQueries = Array.isArray(traceDetails.retrieval_queries)
+                  ? traceDetails.retrieval_queries.map(String)
+                  : typeof traceDetails.retrieval_query === "string"
+                    ? [traceDetails.retrieval_query]
+                    : [];
+                const decisions = Array.isArray(traceDetails.retrieval_decisions)
+                  ? traceDetails.retrieval_decisions.map(asRecord)
+                  : [];
                 return (
                   <article className={`reason-act-step ${running ? "reason-act-step-live" : ""}`} key={`${event.sequence ?? index}-${event.event}`}>
                     <div className="trace-step-rail"><span>{String(index + 1).padStart(2, "0")}</span><i /></div>
@@ -235,6 +272,36 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
                         <section className="trace-action"><span><Wrench size={14} /> ACT · 执行动作</span><p>{step.action}</p></section>
                         <section className="trace-observe"><span><Eye size={14} /> OBSERVE · 节点观察</span><p>{step.observation}</p></section>
                       </div>
+                      {(retrievalQueries.length > 0 || decisions.length > 0) && (
+                        <section className="retrieval-audit">
+                          <header><Search size={14} /><strong>RETRIEVAL AUDIT · 真实检索与 Top-K 筛选</strong></header>
+                          {retrievalQueries.map((query, queryIndex) => (
+                            <code key={`${query}-${queryIndex}`}>{query}</code>
+                          ))}
+                          {decisions.length > 0 && (
+                            <div className="candidate-list">
+                              {decisions.map((decision, decisionIndex) => {
+                                const selected = Boolean(decision.selected);
+                                const accepted = Boolean(decision.accepted);
+                                return (
+                                  <article className={selected ? "candidate-selected" : "candidate-rejected"} key={`${String(decision.paper_id)}-${decisionIndex}`}>
+                                    {selected ? <CheckCircle2 size={15} /> : <XCircle size={15} />}
+                                    <div>
+                                      <strong>{String(decision.title ?? "未命名候选")}</strong>
+                                      <small>
+                                        {selected ? "TOP-K 入选" : accepted ? "相关但排在 Top-K 外" : "相关性门槛拒绝"}
+                                        {` · relevance ${Number(decision.relevance_score ?? 0).toFixed(3)}`}
+                                        {` · ${String(decision.source ?? "unknown")}`}
+                                      </small>
+                                      <p>{String(decision.reason ?? "无诊断信息")}</p>
+                                    </div>
+                                  </article>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </section>
+                      )}
                       <footer>
                         <span className="next-node">NEXT · {stageLabel(step.nextNode)}</span>
                         {metrics.map(([key, value]) => (
@@ -247,6 +314,7 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
               })}
             </div>
           )}
+          </div>
         </div>
       )}
     </section>
