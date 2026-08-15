@@ -36,7 +36,7 @@ Synthesize → Atomic Claims → Verify → Quality Gate
 - FastAPI 同步接口、异步任务接口和运行 Trace
 - 可审计 Reason–Act–Observe 实时轨迹：展示节点决策摘要、实际动作、观察结果、下一步与关键指标，不暴露模型私有思维链
 - PostgreSQL 运行快照与 LangGraph checkpoint，支持幂等提交、取消和断点恢复
-- 原生 SSE 进度流、Claim/Evidence 人工审阅记录、BibTeX/CSL JSON 导出
+- 原生 SSE 进度流、DeepSeek 结构化输出 Token 流、Claim/Evidence 人工审阅记录、BibTeX/CSL JSON 导出
 - Prometheus 指标、运行质量摘要，以及可选 OpenTelemetry OTLP trace
 - Redis Streams 任务队列与事件日志、独立 Worker、执行租约和跨副本协作取消
 - AWS S3/MinIO Artifact Store，支持 run-scoped 隔离、分页统计与批量清理
@@ -193,7 +193,7 @@ export RESEARCH_AGENT_DEEPSEEK_MODEL=deepseek-v4-pro
 export RESEARCH_AGENT_DEEPSEEK_BASE_URL=https://api.deepseek.com
 ```
 
-DeepSeek 通过 OpenAI 兼容的 Chat Completions 接入，使用 `json_object` 输出后继续执行 Pydantic、引用白名单和业务语义校验。`deepseek-v4-pro` 适合高质量科研任务，`deepseek-v4-flash` 适合低成本演示。Docker 用户把相同变量写入根目录 `.env` 后，重建 `api` 和 `worker` 即可。不要把模型密钥写入 React 前端或提交到 Git。
+DeepSeek 通过 OpenAI 兼容的流式 Chat Completions 接入，使用 `stream=true` 增量展示 `json_object` 最终输出，聚合完成后继续执行 Pydantic、引用白名单和业务语义校验。`deepseek-v4-pro` 适合高质量科研任务，`deepseek-v4-flash` 适合低成本演示。Docker 用户把相同变量写入根目录 `.env` 后，重建 `api` 和 `worker` 即可。不要把模型密钥写入 React 前端或提交到 Git。
 
 模型价格不会硬编码。需要费用估算时，配置当前模型的每百万 token 价格：
 

@@ -3,8 +3,10 @@ import asyncio
 import pytest
 
 from research_agent.application import IdempotencyConflictError, ResearchApplicationService
-from research_agent.domain import Paper, ResearchRequest, RunStatus, SearchTask
+from research_agent.domain import Paper, ResearchPlan, ResearchRequest, RunStatus, SearchTask
+from research_agent.model_stream import emit_model_stream
 from research_agent.providers import CompositePaperProvider, stable_paper_id
+from research_agent.reasoner import DeterministicReasoner, Reasoned
 from research_agent.workflow import ResearchWorkflow
 
 
@@ -28,6 +30,36 @@ class PausingProvider:
                 score=1,
             )
         ][:limit]
+
+
+class StreamingReasoner(DeterministicReasoner):
+    async def plan(self, request: ResearchRequest) -> Reasoned[ResearchPlan]:
+        invocation_id = "stream-test"
+        await emit_model_stream(
+            "plan",
+            {"phase": "started", "invocation_id": invocation_id, "provider": "deepseek"},
+        )
+        await emit_model_stream(
+            "plan",
+            {
+                "phase": "delta",
+                "invocation_id": invocation_id,
+                "provider": "deepseek",
+                "delta": '{"objective":',
+                "preview": '{"objective":',
+            },
+        )
+        await emit_model_stream(
+            "plan",
+            {
+                "phase": "completed",
+                "invocation_id": invocation_id,
+                "provider": "deepseek",
+                "preview": '{"objective":"verified"}',
+                "validated": True,
+            },
+        )
+        return await super().plan(request)
 
 
 async def _wait_terminal(
@@ -121,6 +153,36 @@ async def test_progress_events_publish_auditable_reason_act_observe_summaries() 
             assert step_trace["action"]
             assert step_trace["observation"]
             assert isinstance(step_trace["metrics"], dict)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_model_stream_events_are_forwarded_to_run_sse_history() -> None:
+    provider = PausingProvider()
+    provider.pause = False
+    service = ResearchApplicationService(
+        ResearchWorkflow(
+            provider=CompositePaperProvider((provider,)),
+            reasoner=StreamingReasoner(),
+        )
+    )
+    try:
+        submitted = await service.submit(
+            ResearchRequest(question="How should model tokens stream safely?", max_iterations=1)
+        )
+        await _wait_terminal(service, submitted.run_id)
+        events = await service.event_history(submitted.run_id)
+
+        streamed = [item for item in events if item.event == "model_stream"]
+        assert [item.details["phase"] for item in streamed] == [
+            "started",
+            "delta",
+            "completed",
+        ]
+        assert all(item.details["node"] == "plan" for item in streamed)
+        assert streamed[1].details["delta"] == '{"objective":'
+        assert streamed[-1].details["validated"] is True
     finally:
         await service.close()
 

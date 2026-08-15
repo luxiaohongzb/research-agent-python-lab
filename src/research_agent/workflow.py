@@ -44,6 +44,7 @@ from research_agent.domain import (
     VerificationStatus,
     WorkerStatus,
 )
+from research_agent.model_stream import ModelStreamCallback, bind_model_stream
 from research_agent.providers import (
     CompositePaperProvider,
     CrossrefPaperProvider,
@@ -192,6 +193,7 @@ class ResearchWorkflow:
         *,
         run_id: str | None = None,
         progress: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        model_progress: ModelStreamCallback | None = None,
     ) -> ResearchResult:
         await self.initialize()
         current_run_id = run_id or uuid4().hex
@@ -231,7 +233,12 @@ class ResearchWorkflow:
             "worker_results": [],
         }
         config = _graph_config(current_run_id)
-        final = await self._invoke_graph(initial, config=config, progress=progress)
+        final = await self._invoke_graph(
+            initial,
+            config=config,
+            progress=progress,
+            model_progress=model_progress,
+        )
         return _to_result(final)
 
     async def resume(
@@ -240,13 +247,24 @@ class ResearchWorkflow:
         *,
         run_id: str,
         progress: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        model_progress: ModelStreamCallback | None = None,
     ) -> ResearchResult:
         await self.initialize()
         config = _graph_config(run_id)
         checkpoint = await self.graph.aget_state(config)
         if not checkpoint.values:
-            return await self.run(request, run_id=run_id, progress=progress)
-        final = await self._invoke_graph(None, config=config, progress=progress)
+            return await self.run(
+                request,
+                run_id=run_id,
+                progress=progress,
+                model_progress=model_progress,
+            )
+        final = await self._invoke_graph(
+            None,
+            config=config,
+            progress=progress,
+            model_progress=model_progress,
+        )
         return _to_result(final)
 
     async def _invoke_graph(
@@ -255,24 +273,26 @@ class ResearchWorkflow:
         *,
         config: dict[str, Any],
         progress: Callable[[str, dict[str, Any]], Awaitable[None]] | None,
+        model_progress: ModelStreamCallback | None,
     ) -> ResearchState:
-        if progress is None:
-            final = await self.graph.ainvoke(graph_input, config=config)
-        else:
-            final = None
-            async for mode, payload in self.graph.astream(
-                graph_input,
-                config=config,
-                stream_mode=["updates", "values"],
-            ):
-                if mode == "values":
-                    final = payload
-                elif mode == "updates":
-                    for node, update in payload.items():
-                        details = _progress_update_details(str(node), update)
-                        await progress(str(node), details)
-            if final is None:
-                raise RuntimeError("research graph completed without a final state")
+        with bind_model_stream(model_progress):
+            if progress is None:
+                final = await self.graph.ainvoke(graph_input, config=config)
+            else:
+                final = None
+                async for mode, payload in self.graph.astream(
+                    graph_input,
+                    config=config,
+                    stream_mode=["updates", "values"],
+                ):
+                    if mode == "values":
+                        final = payload
+                    elif mode == "updates":
+                        for node, update in payload.items():
+                            details = _progress_update_details(str(node), update)
+                            await progress(str(node), details)
+                if final is None:
+                    raise RuntimeError("research graph completed without a final state")
         return cast(ResearchState, final)
 
     async def ingest(self, document: ParsedDocument) -> None:
@@ -1038,6 +1058,8 @@ def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow
                 timeout=current.model_timeout_seconds,
                 max_retries=current.model_max_retries,
                 use_responses_api=False,
+                streaming=True,
+                stream_usage=True,
             )
         else:
             model_name = current.model
@@ -1056,6 +1078,7 @@ def build_default_workflow(settings: Settings | None = None) -> ResearchWorkflow
                 provider=provider,
                 model_name=model_name,
                 structured_output_method=structured_output_method,
+                stream_json_mode=current.reasoner_mode == "deepseek",
                 input_cost_per_million_usd=current.model_input_cost_per_million_usd,
                 output_cost_per_million_usd=current.model_output_cost_per_million_usd,
             )

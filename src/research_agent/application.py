@@ -490,6 +490,16 @@ class ResearchApplicationService:
             active_stage = next_stage
             stage_started = time.monotonic()
 
+        async def model_progress(node: str, details: dict[str, object]) -> None:
+            await self._events.publish(
+                snapshot.run_id,
+                "model_stream",
+                {
+                    "node": node,
+                    **details,
+                },
+            )
+
         async def publish_heartbeats() -> None:
             while True:
                 await asyncio.sleep(self._progress_heartbeat_seconds)
@@ -525,12 +535,14 @@ class ResearchApplicationService:
                         snapshot.request,
                         run_id=snapshot.run_id,
                         progress=progress,
+                        model_progress=model_progress,
                     )
                 else:
                     result = await self._workflow.run(
                         snapshot.request,
                         run_id=snapshot.run_id,
                         progress=progress,
+                        model_progress=model_progress,
                     )
             if await self._cancellations.is_requested(snapshot.run_id):
                 raise RunCancellationRequested(snapshot.run_id)

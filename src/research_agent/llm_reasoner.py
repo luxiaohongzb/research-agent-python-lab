@@ -4,6 +4,7 @@ import json
 from collections.abc import Awaitable, Callable
 from time import perf_counter
 from typing import Any, Literal, TypeVar
+from uuid import uuid4
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict
@@ -24,6 +25,7 @@ from research_agent.domain import (
     VerificationResult,
     VerificationStatus,
 )
+from research_agent.model_stream import emit_model_stream
 from research_agent.prompts import (
     EVIDENCE_SYSTEM_PROMPT,
     PLANNER_SYSTEM_PROMPT,
@@ -111,6 +113,7 @@ class LangChainStructuredReasoner:
         model_name: str,
         structured_output_method: Literal["json_schema", "json_mode"] = "json_schema",
         schema_attempts: int = 2,
+        stream_json_mode: bool = False,
         input_cost_per_million_usd: float | None = None,
         output_cost_per_million_usd: float | None = None,
     ) -> None:
@@ -119,6 +122,7 @@ class LangChainStructuredReasoner:
         self._model_name = model_name
         self._structured_output_method = structured_output_method
         self._schema_attempts = schema_attempts
+        self._stream_json_mode = stream_json_mode
         self._input_cost_per_million_usd = input_cost_per_million_usd
         self._output_cost_per_million_usd = output_cost_per_million_usd
 
@@ -315,6 +319,7 @@ class LangChainStructuredReasoner:
         last_error: BaseException | None = None
         for attempt in range(1, self._schema_attempts + 1):
             started = perf_counter()
+            invocation_id = uuid4().hex[:12]
             try:
                 structured_options: dict[str, Any] = {
                     "method": self._structured_output_method,
@@ -329,7 +334,7 @@ class LangChainStructuredReasoner:
                         f"{system_prompt}\nReturn exactly one JSON object that validates against "
                         f"this JSON Schema: {json.dumps(schema.model_json_schema())}"
                     )
-                messages = [
+                messages: list[SystemMessage | HumanMessage] = [
                     SystemMessage(content=effective_system_prompt),
                     HumanMessage(
                         content=json.dumps(
@@ -338,14 +343,26 @@ class LangChainStructuredReasoner:
                         )
                     ),
                 ]
-                response = await runnable.ainvoke(messages)
-                parsed = response.get("parsed") if isinstance(response, dict) else None
-                parsing_error = (
-                    response.get("parsing_error") if isinstance(response, dict) else None
-                )
-                raw = response.get("raw") if isinstance(response, dict) else None
-                if parsing_error or not isinstance(parsed, schema):
-                    raise ValueError("model response failed schema validation")
+                parsed: SchemaT
+                raw: Any
+                if self._stream_json_mode and self._structured_output_method == "json_mode":
+                    parsed, raw = await self._stream_json_response(
+                        stage=stage,
+                        schema=schema,
+                        messages=messages,
+                        attempt=attempt,
+                        invocation_id=invocation_id,
+                    )
+                else:
+                    response = await runnable.ainvoke(messages)
+                    candidate = response.get("parsed") if isinstance(response, dict) else None
+                    parsing_error = (
+                        response.get("parsing_error") if isinstance(response, dict) else None
+                    )
+                    raw = response.get("raw") if isinstance(response, dict) else None
+                    if parsing_error or not isinstance(candidate, schema):
+                        raise ValueError("model response failed schema validation")
+                    parsed = candidate
                 call = _model_call(
                     stage=stage,
                     provider=self._provider,
@@ -374,6 +391,105 @@ class LangChainStructuredReasoner:
                     )
                 )
         raise StructuredReasoningError(stage, tuple(calls)) from last_error
+
+    async def _stream_json_response(
+        self,
+        *,
+        stage: str,
+        schema: type[SchemaT],
+        messages: list[SystemMessage | HumanMessage],
+        attempt: int,
+        invocation_id: str,
+    ) -> tuple[SchemaT, Any]:
+        await emit_model_stream(
+            stage,
+            {
+                "phase": "started",
+                "invocation_id": invocation_id,
+                "attempt": attempt,
+                "provider": self._provider,
+                "model": self._model_name,
+                "stream_kind": "structured_output",
+            },
+        )
+        raw: Any = None
+        content = ""
+        pending = ""
+        try:
+            async for chunk in self._model.astream(
+                messages,
+                response_format={"type": "json_object"},
+            ):
+                raw = chunk if raw is None else raw + chunk
+                delta = _content_text(getattr(chunk, "content", ""))
+                if not delta:
+                    continue
+                content += delta
+                pending += delta
+                if len(pending) >= 48 or pending.endswith(("\n", ".", "。", "!", "！")):
+                    await emit_model_stream(
+                        stage,
+                        {
+                            "phase": "delta",
+                            "invocation_id": invocation_id,
+                            "attempt": attempt,
+                            "provider": self._provider,
+                            "model": self._model_name,
+                            "delta": pending,
+                            "preview": content[-1600:],
+                            "accumulated_chars": len(content),
+                            "stream_kind": "structured_output",
+                        },
+                    )
+                    pending = ""
+            if pending:
+                await emit_model_stream(
+                    stage,
+                    {
+                        "phase": "delta",
+                        "invocation_id": invocation_id,
+                        "attempt": attempt,
+                        "provider": self._provider,
+                        "model": self._model_name,
+                        "delta": pending,
+                        "preview": content[-1600:],
+                        "accumulated_chars": len(content),
+                        "stream_kind": "structured_output",
+                    },
+                )
+            parsed = schema.model_validate_json(_strip_json_fence(content))
+            await emit_model_stream(
+                stage,
+                {
+                    "phase": "completed",
+                    "invocation_id": invocation_id,
+                    "attempt": attempt,
+                    "provider": self._provider,
+                    "model": self._model_name,
+                    "preview": content[-1600:],
+                    "accumulated_chars": len(content),
+                    "validated": True,
+                    "stream_kind": "structured_output",
+                },
+            )
+            return parsed, raw
+        except Exception as exc:
+            await emit_model_stream(
+                stage,
+                {
+                    "phase": "failed",
+                    "invocation_id": invocation_id,
+                    "attempt": attempt,
+                    "provider": self._provider,
+                    "model": self._model_name,
+                    "preview": content[-1600:],
+                    "accumulated_chars": len(content),
+                    "validated": False,
+                    "error_type": type(exc).__name__,
+                    "stream_kind": "structured_output",
+                },
+            )
+            raise
 
 
 class FallbackResearchReasoner:
@@ -480,6 +596,35 @@ def _model_call(
         success=success,
         error_type=error_type,
     )
+
+
+def _content_text(content: Any) -> str:
+    """Read only assistant output content; provider reasoning metadata is intentionally ignored."""
+
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            value = item.get("text") or item.get("content")
+            if isinstance(value, str):
+                parts.append(value)
+    return "".join(parts)
+
+
+def _strip_json_fence(content: str) -> str:
+    value = content.strip()
+    if value.startswith("```json"):
+        value = value[7:]
+    elif value.startswith("```"):
+        value = value[3:]
+    if value.endswith("```"):
+        value = value[:-3]
+    return value.strip()
 
 
 def _optional_int(value: Any) -> int | None:

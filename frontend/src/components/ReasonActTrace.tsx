@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronUp,
   Eye,
+  Radio,
   ShieldCheck,
   Wrench,
 } from "lucide-react";
@@ -167,6 +168,14 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
     const heartbeat = [...events].reverse().find((event) => event.event === "heartbeat");
     return heartbeat ? [...completed, heartbeat] : completed;
   }, [events, status]);
+  const latestModelStream = useMemo(
+    () => [...events].reverse().find((event) => event.event === "model_stream"),
+    [events],
+  );
+  const modelDetails = latestModelStream?.details ?? {};
+  const modelPhase = String(modelDetails.phase ?? "delta");
+  const modelPreview = typeof modelDetails.preview === "string" ? modelDetails.preview : "";
+  const modelRunning = modelPhase === "started" || modelPhase === "delta";
 
   return (
     <section className="surface reason-act-trace">
@@ -189,6 +198,21 @@ export function ReasonActTrace({ events, status }: { events: RunEvent[]; status:
             <ShieldCheck size={15} />
             <p><strong>过程透明说明</strong>这里展示的是由真实节点输入、工具动作和输出生成的决策摘要，不展示模型私有思维链。</p>
           </div>
+          {!TERMINAL.has(status) && latestModelStream && (
+            <section className={`model-stream-panel ${modelRunning ? "model-stream-panel-live" : ""}`}>
+              <header>
+                <div><Radio size={14} /><strong>MODEL STREAM · {String(modelDetails.provider ?? "MODEL").toUpperCase()}</strong></div>
+                <span>{modelRunning ? "STREAMING" : modelPhase === "completed" ? "SCHEMA VALIDATED" : "RETRYING"}</span>
+              </header>
+              <div className="model-stream-meta">
+                <span>{stageLabel(modelDetails.node)}</span>
+                <span>{String(modelDetails.model ?? "structured model")}</span>
+                <span>{Number(modelDetails.accumulated_chars ?? modelPreview.length)} CHARS</span>
+              </div>
+              <pre>{modelPreview || "正在建立安全流式连接……"}<i aria-hidden="true" /></pre>
+              <p>实时展示模型最终结构化输出；完整内容聚合后再执行 Schema 与领域校验，不包含私有思维链。</p>
+            </section>
+          )}
           {steps.length === 0 ? (
             <div className="trace-empty"><Activity size={18} /><span>等待 Planner 产生第一个可审计步骤……</span></div>
           ) : (

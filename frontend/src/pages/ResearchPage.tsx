@@ -58,6 +58,7 @@ const eventLabels: Record<string, string> = {
   started: "研究流程已经启动",
   progress: "研究阶段向前推进",
   heartbeat: "当前阶段仍在运行",
+  model_stream: "DeepSeek 正在流式生成",
   completed: "研究报告生成完成",
   failed: "研究执行遇到错误",
   cancelled: "研究任务已取消",
@@ -213,7 +214,18 @@ export function ResearchPage(): React.JSX.Element {
         if (event.event === "heartbeat" && last?.event === "heartbeat" && last.details?.node === event.details?.node) {
           return [...current.slice(0, -1), event];
         }
-        return [...current, event].slice(-60);
+        if (event.event === "model_stream" && event.details?.invocation_id) {
+          const invocationId = String(event.details.invocation_id);
+          const existing = current.findIndex(
+            (item) => item.event === "model_stream" && String(item.details?.invocation_id ?? "") === invocationId,
+          );
+          if (existing >= 0) {
+            const next = [...current];
+            next.splice(existing, 1);
+            return [...next, event];
+          }
+        }
+        return [...current, event].slice(-120);
       });
     }).catch((error: unknown) => notify(error instanceof Error ? `实时事件：${error.message}` : "实时事件连接中断", "error"));
   };
@@ -307,9 +319,10 @@ export function ResearchPage(): React.JSX.Element {
     return stageProgress[activeStage.node] ?? 18;
   }, [activeStage.node, snapshot]);
   const timelineEvents = useMemo(() => {
-    const visible = TERMINAL.has(snapshot?.status ?? "PENDING")
-      ? events.filter((event) => event.event !== "heartbeat")
-      : events;
+    const visible = events.filter((event) => (
+      event.event !== "model_stream"
+      && (!TERMINAL.has(snapshot?.status ?? "PENDING") || event.event !== "heartbeat")
+    ));
     return visible.slice(-5);
   }, [events, snapshot?.status]);
   const result = snapshot?.result;

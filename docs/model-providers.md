@@ -22,7 +22,9 @@ RESEARCH_AGENT_PROGRESS_HEARTBEAT_SECONDS=10
 - `deepseek-v4-pro`：优先科研推理和核验质量；
 - `deepseek-v4-flash`：优先响应速度和演示成本。
 
-DeepSeek 使用 OpenAI 兼容的 Chat Completions，不使用 OpenAI Responses API。结构化阶段采用 `response_format={"type":"json_object"}`，Prompt 会携带 Pydantic JSON Schema；返回值仍由 Pydantic 和领域语义规则二次校验。失败会有限重试，再回退确定性 Reasoner，并在 `model_invocations` 和 `warnings` 中留痕。
+DeepSeek 使用 OpenAI 兼容的流式 Chat Completions，不使用 OpenAI Responses API。请求发送 `stream=true` 和 `response_format={"type":"json_object"}`，模型最终输出 Token 会通过运行 SSE 的 `model_stream` 事件增量推送到工作台；服务端同时聚合完整 JSON，再执行 Pydantic 和领域语义规则二次校验。失败会有限重试，再回退确定性 Reasoner，并在 `model_invocations` 和 `warnings` 中留痕。
+
+工作台展示的是可交付的结构化输出流，不读取或转发供应商扩展字段中的 `reasoning_content`。这样可以提供实时反馈，同时避免把模型私有思维链、系统提示词或安全策略暴露到前端。
 
 证据提取和声明核验按 `RESEARCH_AGENT_MODEL_MAX_CONCURRENCY` 受控并发，默认最多 3 路；每个批次结束后统一扣减 Token/费用预算，因此最大预算漂移被限制在一个并发批次内。所有模型阶段同时受研究任务的 `max_elapsed_seconds` 全局截止时间约束，超时后使用确定性 fallback 完成可交付结果。异步任务每隔 `RESEARCH_AGENT_PROGRESS_HEARTBEAT_SECONDS` 秒发布当前阶段与阶段耗时，工作台据此显示后台仍在运行。
 
