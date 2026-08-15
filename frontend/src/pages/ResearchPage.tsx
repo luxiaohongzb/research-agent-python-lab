@@ -5,6 +5,7 @@ import {
   CircleStop,
   Clock3,
   Download,
+  FileText,
   FileCheck2,
   FlaskConical,
   Gauge,
@@ -15,6 +16,8 @@ import {
   Users,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { downloadExport, researchApi } from "../api";
 import { useApp } from "../app-context";
 import type {
@@ -120,12 +123,39 @@ function statusLabel(status: RunStatus): string {
 function eventDetail(event: RunEvent): string {
   const details = event.details ?? {};
   if (event.event === "heartbeat") {
-    return `${stageLabel(details.node)} · 阶段持续 ${Number(details.stage_elapsed_seconds ?? 0)}s`;
+    return `仍在执行 · 已持续 ${Number(details.stage_elapsed_seconds ?? 0)}s`;
   }
   if (event.event === "progress" && details.node) {
-    return `${stageLabel(details.node)}已完成`;
+    return details.next_node
+      ? `阶段已完成 · 下一步 ${stageLabel(details.next_node)}`
+      : "阶段已完成";
   }
   return String(details.status ?? details.error_type ?? "状态已经记录");
+}
+
+function eventTitle(event: RunEvent): string {
+  if (["progress", "heartbeat"].includes(event.event) && event.details?.node) {
+    return stageLabel(event.details.node);
+  }
+  return eventLabels[event.event] ?? event.event;
+}
+
+function eventTime(event: RunEvent): string | null {
+  if (!event.occurred_at) return null;
+  const value = new Date(event.occurred_at);
+  if (Number.isNaN(value.getTime())) return null;
+  return value.toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+function withoutDuplicateTitle(markdown: string, title: string): string {
+  const heading = markdown.match(/^\s*#\s+(.+?)\s*\r?\n+/);
+  if (!heading || heading[1].trim() !== title.trim()) return markdown;
+  return markdown.slice(heading[0].length);
 }
 
 export function ResearchPage(): React.JSX.Element {
@@ -275,7 +305,17 @@ export function ResearchPage(): React.JSX.Element {
     if (snapshot.status === "PENDING") return 12;
     return stageProgress[activeStage.node] ?? 18;
   }, [activeStage.node, snapshot]);
+  const timelineEvents = useMemo(() => {
+    const visible = TERMINAL.has(snapshot?.status ?? "PENDING")
+      ? events.filter((event) => event.event !== "heartbeat")
+      : events;
+    return visible.slice(-5);
+  }, [events, snapshot?.status]);
   const result = snapshot?.result;
+  const reportMarkdown = useMemo(
+    () => result ? withoutDuplicateTitle(result.report.markdown, result.report.title) : "",
+    [result],
+  );
   const supportedRate = result
     ? Math.round((result.verifications.filter((item) => item.status === "SUPPORTED").length / Math.max(1, result.verifications.length)) * 100)
     : 0;
@@ -393,9 +433,18 @@ export function ResearchPage(): React.JSX.Element {
                 </div>
               )}
               <ol className="event-list" aria-live="polite">
-                {events.length === 0 && <li><i /><div><strong>正在连接执行轨迹</strong><span>任务 {snapshot.run_id.slice(0, 12)}</span></div></li>}
-                {events.map((item, index) => (
-                  <li key={`${item.sequence ?? index}-${item.event}`}><i /><div><strong>{eventLabels[item.event] ?? item.event}</strong><span>{eventDetail(item)}</span></div></li>
+                {timelineEvents.length === 0 && <li><i /><div><span className="event-title"><strong>正在连接执行轨迹</strong></span><span>任务 {snapshot.run_id.slice(0, 12)}</span></div></li>}
+                {timelineEvents.map((item, index) => (
+                  <li className={`event-${item.event}`} key={`${item.sequence ?? index}-${item.event}`}>
+                    <i />
+                    <div>
+                      <span className="event-title">
+                        <strong>{eventTitle(item)}</strong>
+                        {eventTime(item) && <time>{eventTime(item)}</time>}
+                      </span>
+                      <span>{eventDetail(item)}</span>
+                    </div>
+                  </li>
                 ))}
               </ol>
               <div className="monitor-actions">
@@ -428,7 +477,24 @@ export function ResearchPage(): React.JSX.Element {
               <button className={resultTab === "claims" ? "active" : ""} role="tab" type="button" onClick={() => setResultTab("claims")}>声明核验 <span>{result.claims.length}</span></button>
               <button className={resultTab === "sources" ? "active" : ""} role="tab" type="button" onClick={() => setResultTab("sources")}>论文来源 <span>{result.papers.length}</span></button>
             </div>
-            {resultTab === "report" && <article className="report-content"><pre>{result.report.markdown}</pre></article>}
+            {resultTab === "report" && (
+              <div className="report-view">
+                <div className="report-meta">
+                  <div><FileText size={16} /><span><strong>RESEARCH MEMO</strong>Markdown 已渲染 · 引用与结构已保留</span></div>
+                  <span>{result.claims.length} CLAIMS · {result.papers.length} SOURCES</span>
+                </div>
+                <article className="report-content markdown-body">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer noopener">{children}</a>,
+                    }}
+                  >
+                    {reportMarkdown}
+                  </ReactMarkdown>
+                </article>
+              </div>
+            )}
             {resultTab === "claims" && (
               <div className="claim-grid">
                 {result.claims.map((claim, index) => {
