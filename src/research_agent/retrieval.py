@@ -15,6 +15,7 @@ from research_agent.domain import (
     RetrievalHit,
     RetrievalLane,
     SearchTask,
+    SourceScope,
 )
 from research_agent.providers import (
     CompositePaperProvider,
@@ -246,19 +247,51 @@ class ResearchRetriever:
 
     @property
     def lane_count(self) -> int:
-        return (
-            self._metadata.provider_count
-            + int(self._index is not None)
-            + int(self._citation_graph is not None)
+        return self.lane_count_for(SourceScope.AUTO)
+
+    def lane_count_for(self, source_scope: SourceScope) -> int:
+        metadata_count = self._metadata.provider_count_for(source_scope)
+        include_index = source_scope in {SourceScope.AUTO, SourceScope.PRIVATE, SourceScope.ALL}
+        include_graph = source_scope in {SourceScope.AUTO, SourceScope.PUBLIC, SourceScope.ALL}
+        return max(
+            1,
+            metadata_count
+            + int(include_index and self._index is not None)
+            + int(include_graph and self._citation_graph is not None and metadata_count > 0),
         )
 
-    async def search(self, task: SearchTask, limit: int) -> RetrievalBatch:
-        metadata_future = self._metadata.search(task, limit)
-        index_future = self._index.search(task.query, limit * 4) if self._index else _empty_hits()
+    def source_names_for(self, source_scope: SourceScope) -> tuple[str, ...]:
+        names = list(self._metadata.provider_names_for(source_scope))
+        if source_scope in {SourceScope.AUTO, SourceScope.PRIVATE, SourceScope.ALL} and self._index:
+            names.append("uploaded_documents")
+        if (
+            source_scope in {SourceScope.AUTO, SourceScope.PUBLIC, SourceScope.ALL}
+            and self._citation_graph
+            and self._metadata.provider_count_for(source_scope) > 0
+        ):
+            names.append(self._citation_graph.name)
+        return tuple(dict.fromkeys(names))
+
+    async def search(
+        self,
+        task: SearchTask,
+        limit: int,
+        source_scope: SourceScope = SourceScope.AUTO,
+    ) -> RetrievalBatch:
+        include_index = source_scope in {SourceScope.AUTO, SourceScope.PRIVATE, SourceScope.ALL}
+        include_graph = source_scope in {SourceScope.AUTO, SourceScope.PUBLIC, SourceScope.ALL}
+        metadata_future = self._metadata.search(task, limit, source_scope)
+        index_future = (
+            self._index.search(task.query, limit * 4)
+            if include_index and self._index
+            else _empty_hits()
+        )
         metadata_batch, index_hits = await asyncio.gather(metadata_future, index_future)
         errors = list(metadata_batch.errors)
+        if not self.source_names_for(source_scope):
+            errors.append(f"source_scope={source_scope.value}: no retrieval source is configured")
         graph_papers: list[Paper] = []
-        if self._citation_graph:
+        if include_graph and self._citation_graph:
             graph_results = await asyncio.gather(
                 *(
                     self._citation_graph.expand(seed, max(2, limit // 2))

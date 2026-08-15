@@ -39,8 +39,19 @@ class VerificationStatus(StrEnum):
     UNSUPPORTED = "UNSUPPORTED"
 
 
+class SourceScope(StrEnum):
+    """The corpus lanes a research run is allowed to query."""
+
+    AUTO = "auto"
+    PUBLIC = "public"
+    PRIVATE = "private"
+    ZOTERO = "zotero"
+    ALL = "all"
+
+
 class ResearchRequest(FrozenModel):
     question: str = Field(min_length=5, max_length=2_000)
+    source_scope: SourceScope = SourceScope.AUTO
     max_papers: int = Field(default=8, ge=1, le=50)
     max_iterations: int = Field(default=2, ge=1, le=5)
     max_workers: int = Field(default=3, ge=1, le=5)
@@ -273,6 +284,7 @@ class ResearchWorkerAssignment(FrozenModel):
     task: SearchTask
     max_papers: int = Field(ge=1)
     timeout_seconds: float = Field(gt=0)
+    source_scope: SourceScope = SourceScope.AUTO
 
 
 class HumanReviewRequest(FrozenModel):

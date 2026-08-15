@@ -38,6 +38,7 @@ from research_agent.domain import (
     ResearchWorkerResult,
     RunStatus,
     SearchTask,
+    SourceScope,
     TraceEvent,
     VerificationResult,
     VerificationStatus,
@@ -162,6 +163,29 @@ class ResearchWorkflow:
             self._checkpoint_context = None
             self._initialized = False
 
+    def _retrieval_lane_count(self, source_scope: SourceScope) -> int:
+        scoped_count = getattr(self._retriever, "lane_count_for", None)
+        if callable(scoped_count):
+            return max(1, int(scoped_count(source_scope)))
+        return max(1, int(self._retriever.lane_count))
+
+    def _retrieval_source_names(self, source_scope: SourceScope) -> tuple[str, ...]:
+        scoped_names = getattr(self._retriever, "source_names_for", None)
+        if callable(scoped_names):
+            return tuple(scoped_names(source_scope))
+        return ("configured_retriever",)
+
+    async def _retrieve(
+        self,
+        task: SearchTask,
+        limit: int,
+        source_scope: SourceScope,
+    ) -> RetrievalBatch:
+        if isinstance(self._retriever, ResearchRetriever):
+            return await self._retriever.search(task, limit, source_scope)
+        # Preserve compatibility with custom retrievers used by integrations and tests.
+        return await self._retriever.search(task, limit)
+
     async def run(
         self,
         request: ResearchRequest,
@@ -172,11 +196,12 @@ class ResearchWorkflow:
         await self.initialize()
         current_run_id = run_id or uuid4().hex
         max_queries = max(3, request.max_iterations * 3)
+        retrieval_lanes = self._retrieval_lane_count(request.source_scope)
         budget = ResearchBudget(
             max_queries=max_queries,
             max_papers=request.max_papers,
             max_iterations=request.max_iterations,
-            max_tool_calls=max_queries * self._retriever.lane_count,
+            max_tool_calls=max_queries * retrieval_lanes,
             max_workers=request.max_workers,
             max_total_tokens=request.max_total_tokens,
             max_cost_usd=request.max_cost_usd,
@@ -309,10 +334,12 @@ class ResearchWorkflow:
 
     async def _dispatch_workers(self, state: ResearchState) -> dict[str, Any]:
         budget = _budget_with_elapsed(state)
+        request = ResearchRequest.model_validate(state["request"])
+        retrieval_lanes = self._retrieval_lane_count(request.source_scope)
         tasks = [SearchTask.model_validate(item) for item in state.get("pending_tasks", [])]
         tool_capacity = (
             budget.max_tool_calls - budget.used_tool_calls
-        ) // self._retriever.lane_count
+        ) // retrieval_lanes
         capacity = min(
             len(tasks),
             budget.remaining_queries,
@@ -332,6 +359,7 @@ class ResearchWorkflow:
                 task=task,
                 max_papers=budget.max_papers,
                 timeout_seconds=min(self._worker_timeout_seconds, remaining_seconds),
+                source_scope=request.source_scope,
             )
             for index, task in enumerate(tasks[:capacity], start=1)
         ]
@@ -350,6 +378,8 @@ class ResearchWorkflow:
                     "worker_ids": [item.worker_id for item in assignments],
                     "artifact_handoff": True,
                     "max_workers": budget.max_workers,
+                    "source_scope": request.source_scope.value,
+                    "sources": self._retrieval_source_names(request.source_scope),
                 },
             ),
         }
@@ -375,7 +405,11 @@ class ResearchWorkflow:
         error_type: str | None = None
         try:
             async with asyncio.timeout(assignment.timeout_seconds):
-                batch = await self._retriever.search(assignment.task, assignment.max_papers)
+                batch = await self._retrieve(
+                    assignment.task,
+                    assignment.max_papers,
+                    assignment.source_scope,
+                )
                 artifact_ref = await self._artifact_store.put(
                     run_id=assignment.run_id,
                     kind=ArtifactKind.RETRIEVAL_BATCH,
@@ -399,6 +433,8 @@ class ResearchWorkflow:
         return {"worker_outputs": [result.model_dump(mode="json")]}
 
     async def _collect_workers(self, state: ResearchState) -> dict[str, Any]:
+        request = ResearchRequest.model_validate(state["request"])
+        retrieval_lanes = self._retrieval_lane_count(request.source_scope)
         results = [
             ResearchWorkerResult.model_validate(item) for item in state.get("worker_outputs", [])
         ]
@@ -429,7 +465,7 @@ class ResearchWorkflow:
             warnings.extend(artifact.errors)
         budget = _budget_with_elapsed(state).consume(
             queries=len(results),
-            tool_calls=len(results) * self._retriever.lane_count,
+            tool_calls=len(results) * retrieval_lanes,
             workers=len(results),
         )
         return {
@@ -475,10 +511,12 @@ class ResearchWorkflow:
 
     async def _search(self, state: ResearchState) -> dict[str, Any]:
         budget = _budget_with_elapsed(state)
+        request = ResearchRequest.model_validate(state["request"])
+        retrieval_lanes = self._retrieval_lane_count(request.source_scope)
         tasks = [SearchTask.model_validate(item) for item in state.get("pending_tasks", [])]
         tool_capacity = (
             budget.max_tool_calls - budget.used_tool_calls
-        ) // self._retriever.lane_count
+        ) // retrieval_lanes
         capacity = min(budget.remaining_queries, tool_capacity)
         selected = [] if budget.exhausted_limits else tasks[:capacity]
         if not selected:
@@ -492,7 +530,10 @@ class ResearchWorkflow:
                 "trace": _trace(state, "search", "Skipped search because the budget is exhausted."),
             }
         batches = await asyncio.gather(
-            *(self._retriever.search(task, budget.max_papers) for task in selected)
+            *(
+                self._retrieve(task, budget.max_papers, request.source_scope)
+                for task in selected
+            )
         )
         papers = [Paper.model_validate(item) for item in state.get("papers", [])]
         passages = [Passage.model_validate(item) for item in state.get("raw_passages", [])]
@@ -503,7 +544,7 @@ class ResearchWorkflow:
             errors.extend(batch.errors)
         consumed = budget.consume(
             queries=len(selected),
-            tool_calls=len(selected) * self._retriever.lane_count,
+            tool_calls=len(selected) * retrieval_lanes,
         )
         warnings = [*state.get("warnings", []), *errors]
         return {
@@ -516,7 +557,12 @@ class ResearchWorkflow:
                 "search",
                 f"Executed {len(selected)} queries and collected {len(papers)} papers "
                 f"and {len(passages)} passages.",
-                {"retrieval_errors": errors, "retrieval_lanes": self._retriever.lane_count},
+                {
+                    "retrieval_errors": errors,
+                    "retrieval_lanes": retrieval_lanes,
+                    "source_scope": request.source_scope.value,
+                    "sources": self._retrieval_source_names(request.source_scope),
+                },
             ),
         }
 

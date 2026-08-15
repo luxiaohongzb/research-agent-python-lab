@@ -17,7 +17,13 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { downloadExport, researchApi } from "../api";
 import { useApp } from "../app-context";
-import type { ResearchRequest, RunEvent, RunSnapshot, RunStatus } from "../types";
+import type {
+  ResearchRequest,
+  ResearchSourceScope,
+  RunEvent,
+  RunSnapshot,
+  RunStatus,
+} from "../types";
 
 const TERMINAL = new Set<RunStatus>(["COMPLETED", "NEEDS_REVIEW", "FAILED", "CANCELLED"]);
 const RUN_KEY = "atlas-active-run";
@@ -26,6 +32,22 @@ const examples = [
   "比较 Agentic RAG 与传统 RAG 在复杂科研任务中的可靠性及评估方法。",
   "分析多智能体协作在科学发现中的应用证据、风险与未来方向。",
 ];
+
+const sourceOptions: { value: ResearchSourceScope; label: string; hint: string }[] = [
+  { value: "auto", label: "智能选择", hint: "按当前连接自动路由" },
+  { value: "public", label: "公开论文", hint: "OpenAlex · Crossref" },
+  { value: "private", label: "上传文档", hint: "仅检索私有知识库" },
+  { value: "zotero", label: "Zotero", hint: "通过 MCP 检索文库" },
+  { value: "all", label: "全部来源", hint: "跨来源融合与去重" },
+];
+
+const sourceScopeLabels: Record<ResearchSourceScope, string> = {
+  auto: "智能选择",
+  public: "公开论文",
+  private: "上传文档",
+  zotero: "Zotero 文库",
+  all: "全部来源",
+};
 
 const eventLabels: Record<string, string> = {
   queued: "任务进入研究队列",
@@ -114,6 +136,7 @@ export function ResearchPage(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<RunSnapshot | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [resultTab, setResultTab] = useState<"report" | "claims" | "sources">("report");
+  const [sourceScope, setSourceScope] = useState<ResearchSourceScope>("auto");
   const [budget, setBudget] = useState({ max_papers: 8, max_iterations: 2, max_workers: 3, max_cost_usd: 5 });
   const poller = useRef<number | null>(null);
   const startedAt = useRef<number | null>(null);
@@ -145,6 +168,7 @@ export function ResearchPage(): React.JSX.Element {
   const beginTracking = (run: RunSnapshot): void => {
     setSnapshot(run);
     setQuestion((current) => current || run.request?.question || "");
+    setSourceScope(run.request?.source_scope ?? "auto");
     sessionStorage.setItem(RUN_KEY, run.run_id);
     startedAt.current = run.created_at ? Date.parse(run.created_at) : Date.now();
     setElapsed(Math.max(0, Math.floor((Date.now() - startedAt.current) / 1000)));
@@ -186,7 +210,11 @@ export function ResearchPage(): React.JSX.Element {
     setSubmitting(true);
     setEvents([]);
     try {
-      const payload: ResearchRequest = { question: question.trim(), ...budget };
+      const payload: ResearchRequest = {
+        question: question.trim(),
+        source_scope: sourceScope,
+        ...budget,
+      };
       const run = await researchApi.submit(payload);
       beginTracking(run);
       notify("研究任务已创建", "success");
@@ -251,6 +279,12 @@ export function ResearchPage(): React.JSX.Element {
   const supportedRate = result
     ? Math.round((result.verifications.filter((item) => item.status === "SUPPORTED").length / Math.max(1, result.verifications.length)) * 100)
     : 0;
+  const sourceBreakdown = useMemo(() => {
+    if (!result) return [];
+    const counts = new Map<string, number>();
+    result.papers.forEach((paper) => counts.set(paper.source, (counts.get(paper.source) ?? 0) + 1));
+    return [...counts.entries()].sort((left, right) => right[1] - left[1]);
+  }, [result]);
 
   return (
     <div className="research-page">
@@ -289,6 +323,27 @@ export function ResearchPage(): React.JSX.Element {
               </button>
             ))}
           </div>
+          <fieldset className="source-selector">
+            <legend><Search size={15} /> 本次研究检索范围</legend>
+            <div className="source-option-grid">
+              {sourceOptions.map((option) => (
+                <label
+                  className={sourceScope === option.value ? "active" : ""}
+                  key={option.value}
+                >
+                  <input
+                    type="radio"
+                    name="source-scope"
+                    value={option.value}
+                    checked={sourceScope === option.value}
+                    onChange={() => setSourceScope(option.value)}
+                  />
+                  <span>{option.label}</span>
+                  <small>{option.hint}</small>
+                </label>
+              ))}
+            </div>
+          </fieldset>
           <button className="budget-toggle" type="button" aria-expanded={showBudget} onClick={() => setShowBudget((value) => !value)}>
             <span><Gauge size={16} /> 研究预算与边界</span>
             <span>{showBudget ? "收起 −" : "调整 +"}</span>
@@ -328,6 +383,9 @@ export function ResearchPage(): React.JSX.Element {
               </div>
               <div className="run-progress"><i style={{ width: `${progress}%` }} /></div>
               <div className="run-question">{question || snapshot.request?.question || "正在恢复上一次研究任务"}</div>
+              <div className="run-source-scope">
+                <Search size={13} /> 检索范围 · {sourceScopeLabels[snapshot.request?.source_scope ?? sourceScope]}
+              </div>
               {!TERMINAL.has(snapshot.status) && (
                 <div className="run-stage" aria-live="polite">
                   <span className="stage-pulse" />
@@ -381,6 +439,12 @@ export function ResearchPage(): React.JSX.Element {
             )}
             {resultTab === "sources" && (
               <div className="source-list">
+                <div className="source-breakdown">
+                  <strong>实际命中来源</strong>
+                  {sourceBreakdown.length > 0
+                    ? sourceBreakdown.map(([source, count]) => <span key={source}>{source} · {count}</span>)
+                    : <span>本次没有命中文献</span>}
+                </div>
                 {result.papers.map((paper, index) => <article key={paper.paper_id}><span>{String(index + 1).padStart(2, "0")}</span><div><h4>{paper.title}</h4><p>{paper.authors?.join(" · ") || "作者信息暂缺"}{paper.year ? ` · ${paper.year}` : ""}</p><small>{paper.source}{paper.doi ? ` · DOI ${paper.doi}` : ""}</small></div></article>)}
               </div>
             )}
