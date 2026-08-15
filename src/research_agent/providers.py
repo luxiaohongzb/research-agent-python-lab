@@ -9,7 +9,7 @@ from typing import Any, Protocol
 import httpx
 from pydantic import HttpUrl
 
-from research_agent.domain import Paper, SearchTask
+from research_agent.domain import Paper, SearchTask, SourceScope
 
 _SEARCH_STOPWORDS = frozenset(
     {
@@ -165,19 +165,65 @@ class CompositePaperProvider:
     def provider_count(self) -> int:
         return len(self._providers)
 
-    async def search(self, task: SearchTask, limit: int) -> SearchBatch:
+    def providers_for(self, source_scope: SourceScope) -> tuple[PaperProvider, ...]:
+        public = tuple(
+            provider for provider in self._providers if _provider_kind(provider) == "public"
+        )
+        zotero = tuple(
+            provider for provider in self._providers if _provider_kind(provider) == "zotero"
+        )
+        offline = tuple(
+            provider for provider in self._providers if _provider_kind(provider) == "offline"
+        )
+        if source_scope is SourceScope.PUBLIC:
+            return public
+        if source_scope is SourceScope.ZOTERO:
+            return zotero
+        if source_scope is SourceScope.PRIVATE:
+            return ()
+        configured = (*public, *zotero)
+        if source_scope is SourceScope.ALL:
+            return configured
+        # Demo fixtures are a fallback, never mixed into a real research corpus.
+        return configured or offline
+
+    def provider_count_for(self, source_scope: SourceScope) -> int:
+        return len(self.providers_for(source_scope))
+
+    def provider_names_for(self, source_scope: SourceScope) -> tuple[str, ...]:
+        return tuple(provider.name for provider in self.providers_for(source_scope))
+
+    async def search(
+        self,
+        task: SearchTask,
+        limit: int,
+        source_scope: SourceScope = SourceScope.AUTO,
+    ) -> SearchBatch:
+        providers = self.providers_for(source_scope)
+        if not providers:
+            return SearchBatch((), ())
         outcomes = await asyncio.gather(
-            *(provider.search(task, limit) for provider in self._providers),
+            *(provider.search(task, limit) for provider in providers),
             return_exceptions=True,
         )
         papers: list[Paper] = []
         errors: list[str] = []
-        for provider, outcome in zip(self._providers, outcomes, strict=True):
+        for provider, outcome in zip(providers, outcomes, strict=True):
             if isinstance(outcome, BaseException):
                 errors.append(f"{provider.name}: {type(outcome).__name__}")
             else:
                 papers.extend(outcome)
         return SearchBatch(tuple(papers), tuple(errors))
+
+
+def _provider_kind(provider: PaperProvider) -> str:
+    if provider.name in {"openalex", "crossref", "semantic_scholar"}:
+        return "public"
+    if provider.name.startswith("mcp:"):
+        return "zotero"
+    if provider.name == "offline":
+        return "offline"
+    return "public"
 
 
 def deduplicate_papers(papers: list[Paper] | tuple[Paper, ...]) -> list[Paper]:

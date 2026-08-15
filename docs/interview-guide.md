@@ -23,6 +23,7 @@
 15. API 和执行 Worker 分离：Redis Streams 至少一次投递，终态检查与 run 租约抑制重复执行。
 16. checkpoint、run snapshot、event stream 和 S3 Artifact 各自承担不同恢复语义，不混成一个“状态库”。
 17. MCP 作为受控的数据源适配层：只允许配置的只读工具，先校验工具 Schema 和结构化结果，再转换成 Paper 领域对象；不会把外部工具列表直接交给模型自由执行。
+18. 数据源路由是任务级领域约束：`SourceScope` 同时约束 Supervisor、Worker、工具预算和 Trace，避免公开论文、本地 PDF 与 Zotero 文库发生非预期串库。
 
 ## 常见追问
 
@@ -53,3 +54,7 @@ Artifact 生命周期任务和审批 UI。系统明确采用至少一次投递�
 ### 为什么 MCP 不直接接到 ReAct Agent？
 
 科研系统对来源、预算和引用有确定性约束。当前把 MCP 搜索工具适配为 PaperProvider，外部结果必须经过领域校验、去重、RAG 和 Claim Verifier。这样既获得协议级可插拔性，又不会让任意 MCP 工具绕过权限、预算和证据链。副作用工具需要单独的审批与幂等设计，不能因为 MCP 提供了统一协议就默认可信。
+
+### 公开论文、上传 PDF 和 Zotero 如何避免串库？
+
+API 请求携带 `source_scope`，检索器据此选择元数据 Provider、私有混合索引和 MCP Provider。该字段会继续传入动态派发的 Worker，预算按本次真实启用的检索 lane 计算，Trace 记录计划来源，最终论文保留实际 `source`。`public` 不查私有索引，`private` 不发公网或 MCP 请求，`zotero` 只调用配置的 MCP；`all` 才做跨来源融合与 DOI/标题去重。

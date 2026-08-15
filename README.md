@@ -42,6 +42,7 @@ Synthesize → Atomic Claims → Verify → Quality Gate
 - 响应式科研工作台、API Key/数据库用户 RBAC、可撤销会话、租户隔离、配额、审计日志与失败死信流
 - React + TypeScript 产品前端：研究工作台、拖放 PDF 入库、运行结果与后台管理
 - MCP Client：通过 Streamable HTTP 接入外部只读论文搜索工具，并转换为受校验的 Paper 领域对象
+- 任务级数据源路由：可选择公开论文、上传文档、Zotero、全部来源或智能选择
 - 24 条中英双语 golden cases，以及引用精度、覆盖率、支持率 CI 门禁
 
 ## 技术栈
@@ -84,7 +85,7 @@ npm run dev
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/research/run \
   -H "Content-Type: application/json" \
-  -d '{"question":"How does claim-level verification improve research agents?","max_workers":3,"max_total_tokens":100000,"max_cost_usd":5,"max_elapsed_seconds":300}'
+  -d '{"question":"How does claim-level verification improve research agents?","source_scope":"public","max_workers":3,"max_total_tokens":100000,"max_cost_usd":5,"max_elapsed_seconds":300}'
 ```
 
 ### 异步任务
@@ -111,7 +112,15 @@ RESEARCH_AGENT_PROVIDER_MODE=hybrid
 RESEARCH_AGENT_OPENALEX_EMAIL=you@example.com
 ```
 
-`hybrid` 会并行查询离线语料、OpenAlex 和 Crossref。单个远端源失败不会让整个研究任务失败，错误会进入 Trace。
+`hybrid` 会启用 OpenAlex 和 Crossref。每个任务可通过 `source_scope` 控制检索边界：
+
+- `public`：仅 OpenAlex、Crossref，以及已启用的 Semantic Scholar
+- `private`：仅检索 PDF 上传后建立的私有全文索引
+- `zotero`：仅检索通过 MCP 连接的 Zotero 文库
+- `all`：融合公开论文、私有全文索引和 Zotero，并按 DOI/标题去重
+- `auto`：默认值，自动使用已配置的真实来源；没有真实元数据源时才使用离线示例
+
+React 工作台提供同样的可视化选择器，并在结果“论文来源”页签展示实际命中来源。单个远端源失败不会让整个研究任务失败，错误会进入 Trace 和 warnings。
 
 启用 Semantic Scholar 元数据和引用邻域：
 

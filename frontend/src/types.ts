@@ -6,8 +6,11 @@ export type RunStatus =
   | "FAILED"
   | "CANCELLED";
 
+export type ResearchSourceScope = "auto" | "public" | "private" | "zotero" | "all";
+
 export interface ResearchRequest {
   question: string;
+  source_scope: ResearchSourceScope;
   max_papers: number;
   max_iterations: number;
   max_workers: number;
